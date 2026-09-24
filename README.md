@@ -1,4 +1,4 @@
-![pi-kiro-acp — connected coding tools](docs/assets/readme-banner.png)
+![pi-kiro-acp — connected coding tools](docs/assets/readme-banner-v2.png)
 
 **Pi + Kiro, one coding workspace.** An ACP integration with local tools, session controls and a usage dashboard.
 
