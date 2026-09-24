@@ -1,0 +1,48 @@
+import type { Config } from '../config.js';
+import type { Model, PiStream, EffectiveContext, GenerationOptions, Extractors, HostContext, ModelEntry } from '../types.js';
+import { type Obj } from '../util.js';
+import { Journal } from '../storage/journal.js';
+import { CreditLedger } from '../storage/credits.js';
+import { Admission } from '../admission/leases.js';
+import { Metrics } from '../diagnostics/metrics.js';
+import type { AccountUsage } from '../kiro/account-usage.js';
+export declare class ProviderRuntime {
+    readonly config: Config;
+    readonly extractors: Extractors;
+    readonly journal: Journal;
+    readonly admission: Admission;
+    readonly metrics: Metrics;
+    readonly credits: CreditLedger;
+    private bindings;
+    private reservations;
+    private drains;
+    private host;
+    private hostEpoch;
+    private fallbackSession;
+    private closed;
+    private idleTimer;
+    private lifetime;
+    private inFlight;
+    private discoveries;
+    private accountLoad?;
+    readonly streamFactory: () => PiStream;
+    constructor(config: Config, extractors?: Extractors, streamFactory?: () => PiStream);
+    setHost(ctx: HostContext): void;
+    generate(model: Model, context: EffectiveContext, options?: GenerationOptions): PiStream;
+    private execute;
+    discover(signal?: AbortSignal): Promise<{
+        models: ModelEntry[];
+        version: string;
+        toolAudit: string;
+    }>;
+    refreshAccountUsage(force?: boolean): Promise<AccountUsage>;
+    private loadAccountUsage;
+    reset(): Promise<void>;
+    abortActive(): Promise<void>;
+    invalidate(): Promise<void>;
+    private sweep;
+    status(): Obj;
+    private closeTask?;
+    close(): Promise<void>;
+    private doClose;
+}

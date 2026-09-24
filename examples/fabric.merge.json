@@ -1,0 +1,8 @@
+{
+  "agents": {
+    "runner": "pi",
+    "model": "kiro-acp/auto",
+    "extensions": true,
+    "maxConcurrent": 2
+  }
+}

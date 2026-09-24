@@ -1,0 +1,20 @@
+node_modules/
+*.tgz
+*.zip
+*.sqlite*
+.local/
+coverage/
+release/
+
+# Local profiles, credentials and installation state must stay on this machine.
+.pi/
+.kiro/
+.env
+.env.*
+!.env.example
+kiro-acp.json
+kiro-acp.json.*
+beacon_install_id
+beacon_last_sent
+kiro-acp-installation-id
+.kiro-acp-installation-id.*.tmp

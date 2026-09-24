@@ -1,0 +1,17 @@
+name: offline-checks
+on: [push, pull_request]
+jobs:
+  check:
+    strategy:
+      matrix:
+        node: ['22.16.0', '24']
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm install --ignore-scripts
+      - run: npm run check
+      - run: npm run demo
+# This workflow was supplied but not executed on GitHub during artifact creation.

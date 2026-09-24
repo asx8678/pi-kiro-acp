@@ -1,0 +1,42 @@
+import { DatabaseSync } from 'node:sqlite';
+export type HandoffPhase = 'RECEIVED' | 'EXPOSED_TO_PI' | 'RESULT_RECORDED' | 'RETURNED_TO_KIRO' | 'CANCELLED' | 'UNCERTAIN';
+export interface HandoffRow {
+    id: string;
+    binding: string;
+    generation: string;
+    request_id: string;
+    pi_call_id: string;
+    tool_name: string;
+    args_hash: string;
+    phase: HandoffPhase;
+    result_hash: string | null;
+    owner_pid: number;
+    owner_instance: string;
+    updated_at: number;
+}
+export declare class Journal {
+    readonly dir: string;
+    readonly db: DatabaseSync;
+    readonly instance: string;
+    closed: boolean;
+    constructor(dir: string);
+    transaction<T>(fn: () => T): T;
+    receive(input: {
+        binding: string;
+        generation: string;
+        requestId: string;
+        toolName: string;
+        argsHash: string;
+    }): {
+        row: HandoffRow;
+        duplicate: boolean;
+    };
+    get(id: string): HandoffRow | undefined;
+    transition(id: string, next: HandoffPhase, resultHash?: string): void;
+    unresolved(binding?: string): HandoffRow[];
+    reconcileDeadOwners(): void;
+    ownerLive(instance: string, pid: number): boolean;
+    abandonOwned(): void;
+    prune(olderThan?: number): number;
+    close(): void;
+}

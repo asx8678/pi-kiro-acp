@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "providerId": "kiro-acp",
+  "client": {
+    "name": "kirocrew"
+  },
+  "compatibility": {
+    "allowUnverified": true,
+    "approvedVersions": [],
+    "orderedSteeringVersions": [],
+    "requireToolSnapshot": true
+  },
+  "models": {
+    "plannerId": null,
+    "workerId": "auto"
+  },
+  "admission": {
+    "scope": "my-kiro-account",
+    "maxActive": 3
+  }
+}
