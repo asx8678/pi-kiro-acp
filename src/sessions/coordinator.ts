@@ -41,6 +41,7 @@ export class Binding {
     private busy = false;
     private compactionDirty = false;
     private observer?: GenerationOptions['onProviderStreamEvent'];
+    private promptTask?: string;
     lastUsed = Date.now();
     constructor(readonly key: string, readonly model: Model, readonly effort: string | undefined, readonly first: Snapshot, private config: Config, private journal: Journal, private admission: Admission, private metrics: Metrics) {
         this.catalog = new Catalog(first.tools);
@@ -51,7 +52,9 @@ export class Binding {
         this.kiro.onEvent = async (event) => {
             // Cancellation can deliver final accounting while the binding is closing.
             if (event.kind === 'prompt_start') {
-                metrics.startPrompt(event.promptId, model.id, event.startedAt);
+                if (!this.promptTask)
+                    throw new BridgeError('STORAGE', 'Prompt is missing immutable task attribution.');
+                metrics.startPrompt(event.promptId, model.id, event.startedAt, this.promptTask);
                 return;
             }
             if (event.kind === 'prompt_end') {
@@ -157,7 +160,7 @@ export class Binding {
         this.pending.result = result;
         this.pending.resultMessage = resultMessage;
     }
-    async run(snap: Snapshot, stream: PiStream, options: GenerationOptions): Promise<void> {
+    async run(snap: Snapshot, stream: PiStream, options: GenerationOptions, taskId: string): Promise<void> {
         if (this.busy)
             throw new BridgeError('BUSY', 'Concurrent Pi requests attempted to share one Kiro session.');
         if (this.fatal)
@@ -203,6 +206,7 @@ export class Binding {
                     throw new BridgeError('CONTEXT', 'No new Pi context to generate from; refusing an implicit duplicate prompt.');
                 this.machine.move('GENERATING');
                 this.expected = snap.messages;
+                this.promptTask = taskId;
                 void this.kiro.prompt(input).then(reason => this.endPrompt(reason), e => this.fail(asError(e)));
             }
             await this.complete.promise;

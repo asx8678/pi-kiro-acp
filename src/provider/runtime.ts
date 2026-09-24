@@ -22,10 +22,10 @@ export class ProviderRuntime {
     readonly metrics: Metrics;
     readonly credits: CreditLedger;
     private bindings = new Map<string, Binding>();
-    private reservations = new Set<string>();
-    private drains = new Map<string, ReturnType<typeof deferred<void>>>();
+    // The deferred is both the drain and the ownership token; waiters never own cleanup.
+    private reservations = new Map<string, ReturnType<typeof deferred<void>>>();
     private host: HostContext = { cwd: process.cwd() };
-    private hostEpoch = 0;
+    private resetting = false;
     private fallbackSession = uid('host_');
     private closed = false;
     private idleTimer: NodeJS.Timeout;
@@ -59,6 +59,8 @@ export class ProviderRuntime {
     private async execute(model: Model, context: EffectiveContext, options: GenerationOptions, stream: PiStream): Promise<void> {
         if (this.closed)
             throw new BridgeError('TRANSPORT', 'Provider runtime is closed.');
+        if (this.resetting)
+            throw new BridgeError('BUSY', 'A provider reset is in progress. Retry after it finishes.');
         if (model.provider !== 'kiro-acp')
             throw new BridgeError('POLICY', 'This provider serves only Kiro-backed models.');
         if (options.temperature !== undefined)
@@ -69,6 +71,11 @@ export class ProviderRuntime {
             throw new BridgeError('UNSUPPORTED', 'Per-request environment overrides are not supported; configure the trusted Kiro CLI environment before starting Pi.');
         throwIfAborted(options.signal);
         this.credits.assertAvailable();
+        // Capture request ownership before asynchronous hooks or startup can let
+        // another host task/session replace the mutable foreground context.
+        const logicalId = options.sessionId || this.host.sessionManager?.getSessionId?.() || this.fallbackSession;
+        const cwd = this.host.cwd;
+        const taskId = this.credits.ensureTask({ sessionId: logicalId, sessionName: this.host.sessionManager?.getSessionName?.(), summary: 'Provider or auxiliary request' });
         let effective = context;
         if (options.onPayload) {
             const payload = { transport: 'kiro-acp-v3', modelId: model.id, context };
@@ -84,33 +91,36 @@ export class ProviderRuntime {
             throw cancelled();
         const snap = snapshot(effective, this.extractors, options.toolChoice === 'none', this.config.limits.maxPromptBytes);
         const auxiliary = options.toolChoice === 'none' || snap.tools.length === 0;
-        const logicalId = options.sessionId || this.host.sessionManager?.getSessionId?.() || this.fallbackSession;
-        this.credits.ensureTask({ sessionId: logicalId, sessionName: this.host.sessionManager?.getSessionName?.(), summary: 'Provider or auxiliary request' });
-        const key = hash({ scope: this.config.admission.scope, session: logicalId, epoch: this.hostEpoch, cwd: this.host.cwd, purpose: auxiliary ? uid('aux_') : 'agent' });
-        if (this.reservations.has(key)) {
-            const prior = this.bindings.get(key);
-            if (prior?.streamFinished)
-                await this.drains.get(key)?.promise;
-            else
+        // Preserve the original epoch-zero encoding for on-disk compatibility. A fresh
+        // Binding.generation, not a new recovery identity, distinguishes rebuilt sessions.
+        const key = hash({ scope: this.config.admission.scope, session: logicalId, epoch: 0, cwd, purpose: auxiliary ? uid('aux_') : 'agent' });
+        while (true) {
+            throwIfAborted(options.signal);
+            if (this.closed)
+                throw cancelled();
+            if (this.resetting)
+                throw new BridgeError('BUSY', 'A provider reset is in progress.');
+            const owner = this.reservations.get(key);
+            if (!owner)
+                break;
+            if (!this.bindings.get(key)?.streamFinished)
                 throw new BridgeError('BUSY', 'Two concurrent generations targeted the same Pi conversation.');
+            await withAbort(owner.promise, options.signal);
         }
-        throwIfAborted(options.signal);
-        if (this.closed)
-            throw cancelled();
-        this.reservations.add(key);
         const drain = deferred<void>();
-        this.drains.set(key, drain);
+        this.reservations.set(key, drain);
         let binding = this.bindings.get(key);
         try {
             // Recover only from an actual result supplied by Pi. A dead process's HTTP callback is never restored.
-            for (const row of this.journal.unresolved(key)) {
+            for (const row of this.journal.recoveryCandidates(key)) {
                 if (binding && row.generation === binding.generation)
                     continue;
                 if (this.journal.ownerLive(row.owner_instance, row.owner_pid) && row.owner_instance !== this.journal.instance)
                     throw new BridgeError('BUSY', 'Another live process owns this Pi conversation handoff.');
-                const result = snap.messages.find(m => m.role === 'toolResult' && m.toolCallId === row.pi_call_id && m.toolName === row.tool_name);
-                if (!result)
-                    throw new BridgeError('UNCERTAIN', `Unresolved prior tool ${row.pi_call_id}; inspect Pi and run journal/reconcile before retrying.`);
+                const matches = snap.messages.filter(m => m.role === 'toolResult' && m.toolCallId === row.pi_call_id);
+                const result = matches[0];
+                if (matches.length !== 1 || result?.toolName !== row.tool_name || (row.result_hash && row.result_hash !== hash(result)))
+                    throw new BridgeError('UNCERTAIN', `Unresolved or ambiguous prior tool ${row.pi_call_id}; inspect Pi and run journal/reconcile before retrying. Legacy records may belong to a pre-upgrade reset.`);
                 if (row.phase === 'RECEIVED')
                     this.journal.transition(row.id, 'CANCELLED');
                 else {
@@ -121,8 +131,7 @@ export class ProviderRuntime {
             if (binding?.hasPending)
                 binding.acceptResult(snap);
             if (binding?.needsRebuild(snap, model, typeof options.reasoning === 'string' ? options.reasoning : undefined)) {
-                await binding.close();
-                this.bindings.delete(key);
+                await this.evict(key, binding);
                 binding = undefined;
                 this.metrics.rebuilds++;
             }
@@ -137,22 +146,20 @@ export class ProviderRuntime {
                 this.bindings.set(key, binding);
                 await binding.start(options.signal);
             }
-            await binding.run(snap, stream, options);
+            await binding.run(snap, stream, options, taskId);
         }
         catch (e) {
             if (binding) {
-                await binding.close();
-                this.bindings.delete(key);
+                await this.evict(key, binding);
             }
             throw e;
         }
         finally {
             if (auxiliary && binding) {
-                await binding.close();
-                this.bindings.delete(key);
+                await this.evict(key, binding);
             }
-            this.reservations.delete(key);
-            this.drains.delete(key);
+            if (this.reservations.get(key) === drain)
+                this.reservations.delete(key);
             drain.resolve();
         }
     }
@@ -234,17 +241,30 @@ export class ProviderRuntime {
         }
     }
     async reset(): Promise<void> {
-        if ([...this.bindings.values()].some(b => b.hasPending))
+        if (this.closed)
+            throw cancelled();
+        if (this.journal.unresolved().length || [...this.bindings.values()].some(b => b.hasPending))
             throw new BridgeError('UNCERTAIN', 'Reset refuses pending effects. Cancel, inspect the Pi transcript, then reconcile the journal.');
-        await Promise.all([...this.bindings.values()].map(b => b.close()));
-        this.bindings.clear();
-        this.hostEpoch++;
+        if (this.resetting || this.inFlight.size || this.reservations.size)
+            throw new BridgeError('BUSY', 'Reset requires an idle provider. Cancel or wait for active requests first.');
+        // Set synchronously before the first await: no starter may race with eviction.
+        this.resetting = true;
+        try {
+            await Promise.all([...this.bindings].map(([key, binding]) => this.evict(key, binding)));
+        }
+        finally {
+            this.resetting = false;
+        }
+    }
+    private async evict(key: string, binding: Binding): Promise<void> {
+        await binding.close();
+        if (this.bindings.get(key) === binding)
+            this.bindings.delete(key);
     }
     async abortActive(): Promise<void> {
         for (const [key, b] of [...this.bindings])
             if (b.hasPending || b.isBusy) {
-                await b.close();
-                this.bindings.delete(key);
+                await this.evict(key, b);
             }
     }
     async invalidate(): Promise<void> {
@@ -252,8 +272,7 @@ export class ProviderRuntime {
         // will force a rebuild. Branch identity is not blindly used to erase a live effect.
         for (const [key, b] of [...this.bindings])
             if (!b.hasPending && !b.isBusy) {
-                await b.close();
-                this.bindings.delete(key);
+                await this.evict(key, b);
             }
     }
     private async sweep(): Promise<void> {
@@ -261,8 +280,7 @@ export class ProviderRuntime {
             return;
         for (const [key, b] of [...this.bindings])
             if (!b.hasPending && !b.isBusy && (b.dead || Date.now() - b.lastUsed > this.config.sessions.idleTtlMs)) {
-                await b.close();
-                this.bindings.delete(key);
+                await this.evict(key, b);
             }
     }
     status(): Obj { return { experimental: true, qualifiedVersions: this.config.compatibility.approvedVersions, sessions: [...this.bindings.values()].map(b => b.status()), admission: this.admission.status(), unresolved: this.journal.unresolved(), usage: this.metrics.snapshot() }; }
@@ -282,7 +300,7 @@ export class ProviderRuntime {
         // Keep the journal open until starters and suspended generation owners have drained.
         await Promise.allSettled([...this.inFlight]);
         this.journal.abandonOwned();
-        this.credits.endTask();
+        this.credits.close();
         this.journal.close();
     }
 }

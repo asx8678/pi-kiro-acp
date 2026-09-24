@@ -15,10 +15,11 @@ export declare class Metrics {
     private observations;
     private creditsUsed;
     private creditReports;
+    private creditTotals;
     private creditSources;
     onCredits?: () => void;
     private context?;
-    startPrompt(id: string, model: string, at: number): void;
+    startPrompt(id: string, model: string, at: number, taskId?: string): void;
     finishPrompt(id: string): void;
     observeContext(generation: string, model: string, percent: number): void;
     clearContext(generation: string): void;

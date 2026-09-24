@@ -32,10 +32,12 @@ validation, hooks, rendering, execution and result persistence.
 ## Core lifecycle
 
 A generation snapshots the effective transcript after Pi has assembled system
-sections and tools. Its binding key contains scope, Pi session identity, local
-branch-reset epoch, working directory and purpose. Auxiliary requests receive
-unique bindings and are closed after completion. Concurrent generation into the
-same active binding is refused rather than mixing context.
+sections and tools. Its stable binding key contains scope, Pi session identity,
+working directory and purpose (the original epoch-zero encoding is retained for
+compatibility). Reset does not change recovery identity; each new Binding has a
+separate generation ID. Auxiliary requests receive unique bindings and close after
+completion. Continuation waiters recheck ownership after draining a completed
+stream, so a rejected competitor cannot close the winning request's binding.
 
 A new Binding starts its internal loopback server, inspects the official CLI,
 negotiates v3, injects a minimal custom agent and activates it. It discovers model
@@ -97,6 +99,9 @@ SQLite WAL with full synchronous commits stores handoff metadata and owner
 instances. A closed instance is distinct from a live instance even when Pi reloads
 an extension in the same OS PID. The journal contains no prompt/argument/result
 bodies. Historical Kiro sockets or HTTP callbacks are never restored after death.
+New handoffs receive an atomic `stable_handoffs` side-table marker. Unmarked
+legacy rows have opaque reset-era keys and conservatively participate in recovery
+checks across bindings; they are never silently classified as unrelated.
 
 A known Pi result can reconcile an old handoff. A possible effect with no
 trustworthy result becomes UNCERTAIN. The operator must inspect real state before
@@ -117,7 +122,9 @@ are swept; a pending effect is never discarded as ordinary idle cache.
 Shutdown closes the lifetime cancellation signal first, then drains bindings and
 startup operations before closing the journal. HTTP-listener startup and close
 are serialized. The package includes regression tests for startup-close races,
-async payload cancellation and discovery cancellation.
+async payload cancellation and discovery cancellation. Sending `session/cancel`
+has a short deadline within `cancelGraceMs`; blocked stdin cannot postpone process
+termination indefinitely.
 
 ## Module map
 

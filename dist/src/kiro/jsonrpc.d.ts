@@ -51,7 +51,7 @@ export declare class RpcProcess {
     private fail;
     private terminate;
     private closeTask?;
-    close(): Promise<void>;
+    close(graceMs?: number): Promise<void>;
     private doClose;
     get pid(): number | undefined;
 }

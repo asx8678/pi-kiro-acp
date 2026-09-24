@@ -13,11 +13,12 @@ export class Metrics {
     private observations: Obj[] = [];
     private creditsUsed: number | null = null;
     private creditReports = 0;
+    private creditTotals = new Map<string | undefined, number>();
     private creditSources = new Set<CreditReport['source']>();
     onCredits?: () => void;
     private context?: { generation: string; model: string; percent: number; at: number; source: string };
-    startPrompt(id: string, model: string, at: number): void {
-        this.ledger?.start(id, model, at);
+    startPrompt(id: string, model: string, at: number, taskId?: string): void {
+        this.ledger?.start(id, model, at, taskId);
         this.onCredits?.();
     }
     finishPrompt(id: string): void {
@@ -49,11 +50,20 @@ export class Metrics {
             this.observations.shift();
     }
     observeCredits(report: CreditReport): void {
-        const total = (this.creditsUsed ?? 0) + report.delta;
-        if (!Number.isFinite(report.delta) || !Number.isFinite(total) || total < 0)
+        if (!Number.isFinite(report.delta))
             return;
-        this.ledger?.record(report);
-        this.creditsUsed = total;
+        if (this.ledger) {
+            // Absolute per-prompt corrections are authoritative. Never discard one
+            // because a floating-point sum of deltas drifted just below zero.
+            this.ledger.record(report);
+            this.creditsUsed = this.ledger.currentRunCredits();
+        } else {
+            const total = report.total ?? (this.creditTotals.get(report.promptId) ?? 0) + report.delta;
+            if (!Number.isFinite(total) || total < 0)
+                return;
+            this.creditTotals.set(report.promptId, total);
+            this.creditsUsed = [...this.creditTotals.values()].reduce((sum, value) => sum + value, 0);
+        }
         this.creditReports += report.reports;
         this.creditSources.add(report.source);
         this.observations.push({ at: Date.now(), credits: report.delta, source: report.source });

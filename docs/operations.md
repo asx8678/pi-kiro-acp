@@ -17,7 +17,7 @@ versioned with `version: 1` and provider ID `kiro-acp`.
 | `cli.prefixArgs` | Trusted launcher prefix; empty normally, fixture in tests |
 | `cli.rpcTimeoutMs` | Control/initialization timeout |
 | `cli.promptTimeoutMs` | Wall-clock bound on the entire ACP prompt including tool waits |
-| `cli.cancelGraceMs` | Grace before killing the owned process group |
+| `cli.cancelGraceMs` | Process termination grace, including bounded best-effort cancel delivery |
 | `compatibility.allowUnverified` | Explicit experimental version opt-in |
 | `compatibility.approvedVersions` | Full CLI version strings qualified by the operator |
 | `compatibility.orderedSteeringVersions` | Separately qualified context-ordering contract |
@@ -113,9 +113,20 @@ node dist/src/cli.js reconcile HANDOFF_ID --acknowledge-reviewed
 This changes bookkeeping only; it does not undo or repeat a command. Then state
 what actually happened in the next Pi task. A live owner blocks manual clearing.
 
-`/kiro reset` refuses pending effects. `/kiro cancel` requests Pi cancellation and
-closes active bindings, but cancellation is not rollback. On a transport error,
-the package does not select another model/provider or silently restart a mutation.
+`/kiro reset` requires an idle provider and refuses unresolved durable effects,
+even if cancellation already removed their in-memory binding. It keeps recovery
+identity stable across resets and restarts. `/kiro cancel` closes active bindings,
+but cancellation is not rollback. On a transport error, the package does not
+select another model/provider or silently restart a mutation.
+
+**Upgrading older state:** close old Pi instances before restarting with this
+build. Earlier reset epochs were hashed and cannot be mapped back to their
+conversations. Unresolved legacy records without a stable-key marker therefore
+block new dispatch, even if the current conversation has a different key. Supply
+exactly one matching real Pi result, or use the review-and-reconcile procedure
+above after closing its owner. Do not delete the database or mark uncertain
+effects as completed merely to clear this guard. The added marker table preserves
+old writers' handoff-table layout; completed history is retained.
 
 ## Troubleshooting
 

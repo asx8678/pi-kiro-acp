@@ -37,6 +37,8 @@ try {
     writePrivateJson(path.join(profile, 'settings.json'), {
         npmCommand: ['bun'],
         packages: [root],
+        // A live verification must not silently repeat a potentially billed request.
+        retry: { enabled: false },
     });
     const runtime = new ProviderRuntime(config);
     try {

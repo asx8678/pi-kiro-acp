@@ -111,6 +111,14 @@ name. Summaries are produced locally from existing text; logging consumes no
 model credits. Only bounded excerpts are retained, with basic credential
 redaction; this is a private local log, not a full transcript.
 
+Each request captures its task and session before asynchronous hooks/startup.
+Prompt records use that immutable task ID rather than whichever task happens to
+be foreground when the CLI responds. Concurrent conversations retain separate
+attribution, while explicit child-worker inheritance still joins the parent task.
+Validated absolute credit corrections are persisted before run totals are read
+from the ledger; floating-point delta drift cannot discard a correction or leave
+a corrected charge blocking the budget.
+
 Workers inherit a local task attribution ID. It is removed from the Kiro
 subprocess environment and is not part of ACP client/agent identity. Late worker
 reports append a newer `revision` for the same task. **Use the latest revision
@@ -194,6 +202,7 @@ and session/task navigation. Calendar inspection covered Paris daylight-saving
 boundaries and cross-month session attribution. The official CLI account read
 returned the actual plan allowance; account history and local task totals were
 kept separate.
-No new tests were written and no paid inference prompts were sent for this
-change. Actual credit savings depend on tasks and Kiro routing; they have not
+No new tests were written for the original efficiency change; the later
+lifecycle/accounting hardening adds dedicated regressions described in
+[testing.md](testing.md). No paid inference prompts were sent for this change. Actual credit savings depend on tasks and Kiro routing; they have not
 been measured with billed workloads.

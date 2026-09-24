@@ -15,9 +15,8 @@ export declare class ProviderRuntime {
     readonly credits: CreditLedger;
     private bindings;
     private reservations;
-    private drains;
     private host;
-    private hostEpoch;
+    private resetting;
     private fallbackSession;
     private closed;
     private idleTimer;
@@ -38,6 +37,7 @@ export declare class ProviderRuntime {
     refreshAccountUsage(force?: boolean): Promise<AccountUsage>;
     private loadAccountUsage;
     reset(): Promise<void>;
+    private evict;
     abortActive(): Promise<void>;
     invalidate(): Promise<void>;
     private sweep;

@@ -24,7 +24,8 @@ export interface TaskUsage extends UsageTotals { id: string; summary: string; ou
 export class CreditLedger {
     readonly logFile: string;
     private activeTask?: string;
-    private ownsTask = false;
+    private taskBySession = new Map<string, string>();
+    private ownedTasks = new Set<string>();
     private readonly inheritedTask = process.env.PI_KIRO_CREDIT_OWNER_PID !== String(process.pid) ? process.env.PI_KIRO_CREDIT_TASK_ID : undefined;
     constructor(private journal: Journal, private scope: string, private budget: Config['budget'], readonly timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC') {
         this.logFile = path.join(journal.dir, 'usage.jsonl');
@@ -38,6 +39,7 @@ export class CreditLedger {
             owner_instance TEXT NOT NULL, finished INTEGER NOT NULL DEFAULT 0,
             credits REAL, source TEXT, PRIMARY KEY(scope,id));
             CREATE INDEX IF NOT EXISTS credit_prompts_day ON credit_prompts(scope,started_at);
+            CREATE INDEX IF NOT EXISTS credit_prompts_owner ON credit_prompts(scope,owner_instance);
             CREATE TABLE IF NOT EXISTS credit_tasks (
                 scope TEXT NOT NULL, id TEXT NOT NULL, session_id TEXT NOT NULL,
                 session_name TEXT NOT NULL, summary TEXT NOT NULL, started_at INTEGER NOT NULL,
@@ -60,44 +62,60 @@ export class CreditLedger {
         });
         journal.db.function('kiro_credit_day', { deterministic: true }, at => localDay(Number(at), this.timeZone));
     }
-    beginTask(details: TaskDetails): void {
-        if (this.inheritedTask && this.task(this.inheritedTask)) {
-            this.activeTask = this.inheritedTask;
-            this.ownsTask = false;
-            return;
-        }
-        this.endTask();
+    private createTask(details: TaskDetails): string {
         const id = uid('task_');
         const summary = redact(details.summary).replace(/\s+/g, ' ').trim().slice(0, 300) || 'Provider request';
         const name = (details.sessionName || `Session ${details.sessionId.slice(0, 12)}`).slice(0, 200);
         this.journal.db.prepare('INSERT INTO credit_tasks(scope,id,session_id,session_name,summary,started_at) VALUES (?,?,?,?,?,?)')
             .run(this.scope, id, details.sessionId, name, summary, Date.now());
+        this.taskBySession.set(details.sessionId, id);
+        this.ownedTasks.add(id);
+        return id;
+    }
+    beginTask(details: TaskDetails): string {
+        this.endTask();
+        if (this.inheritedTask && this.task(this.inheritedTask)) {
+            this.activeTask = this.inheritedTask;
+            return this.activeTask;
+        }
+        const id = this.createTask(details);
         this.activeTask = id;
-        this.ownsTask = true;
-        // Fabric inherits this in child workers. These fields never enter ACP payloads.
+        // Only the explicit host task controls worker inheritance. Resolving another
+        // conversation's fallback task must not overwrite this process-wide context.
         process.env.PI_KIRO_CREDIT_TASK_ID = id;
         process.env.PI_KIRO_CREDIT_OWNER_PID = String(process.pid);
+        return id;
     }
-    ensureTask(details: TaskDetails): void {
-        if (!this.activeTask)
-            this.beginTask(details);
+    ensureTask(details: TaskDetails): string {
+        if (this.inheritedTask && this.task(this.inheritedTask))
+            return this.inheritedTask;
+        return this.taskBySession.get(details.sessionId) ?? this.createTask(details);
     }
     noteResult(summary: string, outcome?: string): void {
-        if (this.activeTask && this.ownsTask)
+        if (this.activeTask && this.ownedTasks.has(this.activeTask))
             this.journal.db.prepare('UPDATE credit_tasks SET result_summary=COALESCE(?,result_summary),outcome=COALESCE(?,outcome) WHERE scope=? AND id=?')
                 .run(summary ? redact(summary).replace(/\s+/g, ' ').trim().slice(0, 500) : null, outcome?.slice(0, 32) ?? null, this.scope, this.activeTask);
     }
-    endTask(): void {
-        if (this.activeTask && this.ownsTask) {
-            this.journal.db.prepare('UPDATE credit_tasks SET finished_at=? WHERE scope=? AND id=?').run(Date.now(), this.scope, this.activeTask);
-            this.publish(this.activeTask);
-            if (process.env.PI_KIRO_CREDIT_TASK_ID === this.activeTask) {
+    endTask(id = this.activeTask): void {
+        if (!id) return;
+        if (this.ownedTasks.has(id)) {
+            this.journal.db.prepare('UPDATE credit_tasks SET finished_at=? WHERE scope=? AND id=?').run(Date.now(), this.scope, id);
+            this.publish(id);
+            this.ownedTasks.delete(id);
+            for (const [session, task] of this.taskBySession)
+                if (task === id) this.taskBySession.delete(session);
+            if (process.env.PI_KIRO_CREDIT_TASK_ID === id) {
                 delete process.env.PI_KIRO_CREDIT_TASK_ID;
                 delete process.env.PI_KIRO_CREDIT_OWNER_PID;
             }
         }
+        if (this.activeTask === id) this.activeTask = undefined;
+    }
+    /** Finish all runtime-owned fallback tasks, never an inherited parent's task. */
+    close(): void {
+        for (const id of [...this.ownedTasks]) this.endTask(id);
         this.activeTask = undefined;
-        this.ownsTask = false;
+        this.taskBySession.clear();
     }
     private task(id: string): TaskRow | undefined {
         return this.journal.db.prepare('SELECT * FROM credit_tasks WHERE scope=? AND id=?').get(this.scope, id) as unknown as TaskRow | undefined;
@@ -137,10 +155,12 @@ export class CreditLedger {
         if (typeof row?.task_id === 'string')
             this.publish(row.task_id);
     }
-    start(id: string, model: string, at: number): void {
-        this.ensureTask({ sessionId: this.journal.instance, summary: 'Provider request' });
+    start(id: string, model: string, at: number, taskId?: string): void {
+        const task = taskId ?? this.activeTask ?? this.ensureTask({ sessionId: this.journal.instance, summary: 'Provider request' });
+        if (!this.task(task))
+            throw new BridgeError('STORAGE', 'Prompt task does not belong to this accounting scope.');
         this.journal.db.prepare('INSERT OR IGNORE INTO credit_prompts(scope,id,model,started_at,updated_at,owner_instance,task_id) VALUES (?,?,?,?,?,?,?)')
-            .run(this.scope, id, model, at, at, this.journal.instance, this.activeTask ?? null);
+            .run(this.scope, id, model, at, at, this.journal.instance, task);
     }
     finish(id: string): void {
         if (!this.journal.closed) {
@@ -157,6 +177,11 @@ export class CreditLedger {
         if (Number(result.changes) !== 1)
             throw new BridgeError('STORAGE', 'Credit report has no matching admitted prompt.');
         this.updateReport(report.promptId);
+    }
+    currentRunCredits(): number | null {
+        const row = this.journal.db.prepare('SELECT SUM(credits) AS used FROM credit_prompts WHERE scope=? AND owner_instance=?')
+            .get(this.scope, this.journal.instance) as { used: number | null };
+        return row.used;
     }
     recordTokens(report: TokenReport): void {
         const values = tokenFields.map(field => report.counts[field] ?? null);

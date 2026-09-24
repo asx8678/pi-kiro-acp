@@ -5,18 +5,30 @@
 The archive contains compiled tests, so the offline suite needs only Node:
 
 ```sh
-bun run test
+node scripts/test.mjs
 node dist/src/cli.js demo
 ```
 
 To test changed source rather than the shipped build:
 
 ```sh
-bun install --ignore-scripts --omit=peer
-bun run typecheck
-bun run build
-bun run test
+bun install --ignore-scripts --omit=peer --frozen-lockfile
+npm run check
 ```
+
+`npm test` runs the same Node test harness. It creates a temporary Pi profile,
+forces offline account reads, and isolates inherited task IDs; tests never depend
+on the developer's installed Fabric patch or live configuration. Package release
+checks use this harness too. `npm run check` does not require Bun; an alternative
+dependency install is `npm install --ignore-scripts --omit=peer`. The Bun lockfile
+uses public registry URLs rather than an authenticated private mirror.
+
+Dedicated recovery/accounting regressions cover cancel/reset/restart, opaque
+legacy keys, duplicate results, simultaneous continuations, reset/startup exclusion,
+blocked stdin with ignored SIGTERM, immutable session/task attribution, floating
+credit corrections and budget reopening, estimated token envelopes/aliases,
+partial token coverage, ambiguous account allowances and both Paris DST changes.
+These use synthetic accounting and the offline fixture, not billed requests.
 
 The fixture implements the expected ACP dialect and uses a **real** subprocess
 and **real** authenticated loopback MCP calls. It performs no inference or
@@ -54,7 +66,9 @@ bun run test:pi --live auto --allow-billed
 
 This uses the same inert tool and temporary Pi profile, requires strict tool
 verification, and checks that Pi executes exactly one call and receives its real
-result. It can incur Kiro usage/cost. It does not test Fabric or Fovea workflows.
+result. Automatic Pi retries are disabled so a potentially billed request is not
+silently repeated. It can incur Kiro usage/cost. It does not test Fabric or Fovea
+workflows.
 
 Tool-surface tests cover native/foreign tags, missing provenance, incomplete or
 disabled catalogs, reconnects, removal after verification, unsupported versions,
@@ -67,9 +81,9 @@ publications reuse the loaded result, and explicit commands can refresh or retry
 
 ### Local verification, 2026-09-24
 
-Verified with Pi 0.87.1, Kiro CLI 2.24.0, Node 24.20.0 and Bun 1.4.2:
+Verified with Pi 0.87.1, Kiro CLI 2.24.0, Node 24.21.0 and Bun 1.4.2:
 
-- Typecheck and build passed; all 95 automated tests passed.
+- Typecheck and build passed; all 124 automated tests passed.
 - The installed Pi host passed the offline Kiro fixture check.
 - The standalone live Auto smoke test completed one host tool round trip.
 - An earlier live Auto probe passed using the former Kiro Crew ACP/MCP identities and

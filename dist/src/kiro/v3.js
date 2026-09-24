@@ -1,5 +1,5 @@
 import { BridgeError, asError, throwIfAborted } from '../errors.js';
-import { object, list, str, sleep, deferred, uid } from '../util.js';
+import { object, list, str, sleep, deferred, uid, withAbort } from '../util.js';
 import { RpcProcess, RpcRemoteError, inspectCli } from './jsonrpc.js';
 import { ToolSurfaceAudit } from './tool-surface.js';
 import { BRIDGE_MODE, clientInfo, SERVER_NAME } from './identity.js';
@@ -321,13 +321,16 @@ export class V3Session {
         if (this.disposed)
             return;
         this.disposed = true;
+        const deadline = performance.now() + this.config.cli.cancelGraceMs;
         if (this.sessionId)
             try {
-                await this.rpc.notify('session/cancel', { sessionId: this.sessionId });
+                // A queued stdin write can remain blocked forever. Notification is
+                // best effort and consumes, rather than extends, the kill grace budget.
+                await withAbort(this.rpc.notify('session/cancel', { sessionId: this.sessionId }), AbortSignal.timeout(Math.min(50, this.config.cli.cancelGraceMs)));
             }
             catch { /* transport already closed */ }
         // Kill the owned process rather than deleting user Kiro session records.
-        await this.rpc.close();
+        await this.rpc.close(Math.max(0, deadline - performance.now()));
         await this.eventsTail;
         await this.promptDrained?.promise;
     }

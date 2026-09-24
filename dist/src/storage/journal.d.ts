@@ -34,6 +34,11 @@ export declare class Journal {
     get(id: string): HandoffRow | undefined;
     transition(id: string, next: HandoffPhase, resultHash?: string): void;
     unresolved(binding?: string): HandoffRow[];
+    /** Old reset epochs were hashed and cannot be mapped back to a conversation.
+     * Fail closed for unmarked legacy effects, even when their binding differs.
+     * New writers publish the marker atomically with the handoff.
+     */
+    recoveryCandidates(binding: string): HandoffRow[];
     reconcileDeadOwners(): void;
     ownerLive(instance: string, pid: number): boolean;
     abandonOwned(): void;

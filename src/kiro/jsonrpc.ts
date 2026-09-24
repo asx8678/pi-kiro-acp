@@ -194,8 +194,8 @@ export class RpcProcess {
         catch { /* already gone */ }
     }
     private closeTask?: Promise<void>;
-    close(): Promise<void> { return this.closeTask ??= this.doClose(); }
-    private async doClose(): Promise<void> {
+    close(graceMs = this.config.cli.cancelGraceMs): Promise<void> { return this.closeTask ??= this.doClose(graceMs); }
+    private async doClose(graceMs: number): Promise<void> {
         if (!this.child) {
             this.closed = true;
             return;
@@ -209,7 +209,7 @@ export class RpcProcess {
             this.pending.clear();
         }
         this.terminate('SIGTERM');
-        const timeout = setTimeout(() => this.terminate('SIGKILL'), this.config.cli.cancelGraceMs);
+        const timeout = setTimeout(() => this.terminate('SIGKILL'), Math.max(0, graceMs));
         try {
             await this.closeResult.promise;
         }

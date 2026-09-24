@@ -31,6 +31,9 @@ export class Journal {
         result_hash TEXT,owner_pid INTEGER NOT NULL,owner_instance TEXT NOT NULL,updated_at INTEGER NOT NULL,
         UNIQUE(binding,generation,request_id));
       CREATE INDEX IF NOT EXISTS handoffs_binding ON handoffs(binding,phase);
+      -- A side table leaves old writers' positional handoff inserts compatible.
+      -- Missing markers are opaque legacy identities, never assumed unrelated.
+      CREATE TABLE IF NOT EXISTS stable_handoffs (id TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS leases (
         id TEXT PRIMARY KEY,scope TEXT NOT NULL,owner_pid INTEGER NOT NULL,owner_instance TEXT NOT NULL,
         state TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
@@ -67,6 +70,7 @@ export class Journal {
             }
             const id = uid('handoff_'), call = uid('kiro_');
             this.db.prepare('INSERT INTO handoffs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)').run(id, input.binding, input.generation, input.requestId, call, input.toolName, input.argsHash, 'RECEIVED', null, process.pid, this.instance, Date.now());
+            this.db.prepare('INSERT INTO stable_handoffs(id) VALUES (?)').run(id);
             return { row: this.get(id), duplicate: false };
         });
     }
@@ -87,6 +91,16 @@ export class Journal {
         const sql = "SELECT * FROM handoffs WHERE phase IN ('RECEIVED','EXPOSED_TO_PI','UNCERTAIN')";
         return (binding ? this.db.prepare(sql + ' AND binding=?').all(binding) : this.db.prepare(sql).all());
     }
+    /** Old reset epochs were hashed and cannot be mapped back to a conversation.
+     * Fail closed for unmarked legacy effects, even when their binding differs.
+     * New writers publish the marker atomically with the handoff.
+     */
+    recoveryCandidates(binding) {
+        return this.db.prepare(`SELECT h.* FROM handoffs h
+            WHERE h.phase IN ('RECEIVED','EXPOSED_TO_PI','UNCERTAIN')
+            AND (h.binding=? OR NOT EXISTS (SELECT 1 FROM stable_handoffs s WHERE s.id=h.id))`)
+            .all(binding);
+    }
     reconcileDeadOwners() {
         for (const row of this.unresolved()) {
             if (row.owner_instance === this.instance || this.ownerLive(row.owner_instance, row.owner_pid))
@@ -104,7 +118,11 @@ export class Journal {
                 this.transition(row.id, row.phase === 'RECEIVED' ? 'CANCELLED' : 'UNCERTAIN');
     }
     prune(olderThan = Date.now() - 7 * 86400000) {
-        return Number(this.db.prepare("DELETE FROM handoffs WHERE phase IN ('RETURNED_TO_KIRO','CANCELLED') AND updated_at<?").run(olderThan).changes);
+        return this.transaction(() => {
+            const changes = this.db.prepare("DELETE FROM handoffs WHERE phase IN ('RETURNED_TO_KIRO','CANCELLED') AND updated_at<?").run(olderThan).changes;
+            this.db.exec('DELETE FROM stable_handoffs WHERE id NOT IN (SELECT id FROM handoffs)');
+            return Number(changes);
+        });
     }
     close() {
         if (this.closed)

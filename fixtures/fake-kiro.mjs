@@ -7,6 +7,7 @@ const taggedInventory=args.includes('--tags-inventory');
 if(args.includes('--version')){console.log(taggedInventory?'kiro-cli 2.24.0':'mock-kiro 0.1.0');process.exit(0);}
 if(args.includes('--help')){console.log('acp --agent-engine v3 --auth-method cli');process.exit(0);}
 if(!args.includes('acp'))process.exit(2);
+if(args.includes('--stall-after-select')){process.on('SIGTERM',()=>{});setInterval(()=>{},1000);}
 let session,sequence=0;const running=new Map();const reverse=new Map();
 const output=f=>process.stdout.write(JSON.stringify({jsonrpc:'2.0',...f})+'\n');
 const reply=(id,result)=>output({id,result});
@@ -56,7 +57,9 @@ async function handle(f){
     }
     case 'session/set_config_option':{
       if(p.configId==='model')session.model=p.value;else if(p.configId==='effortLevel')session.effort=p.value;
-      else throw new Error('Unknown configuration option');reply(f.id,options());break;
+      else throw new Error('Unknown configuration option');reply(f.id,options());
+      if(args.includes('--stall-after-select')){reader.pause();process.stdin.pause();}
+      break;
     }
     case '_session/steer':session.steer=p.message;reply(f.id,{queued:true,messageId:'s-'+(++sequence)});break;
     case 'session/cancel':{
@@ -96,7 +99,8 @@ async function handle(f){
     default:output({id:f.id,error:{code:-32601,message:'Unsupported fixture method: '+f.method}});
   }
 }
-readline.createInterface({input:process.stdin,crlfDelay:Infinity}).on('line',line=>{
+const reader=readline.createInterface({input:process.stdin,crlfDelay:Infinity});
+reader.on('line',line=>{
   try{const f=JSON.parse(line);void handle(f).catch(e=>output({id:f.id,error:{code:-32000,message:e.message}}));}
   catch{process.exitCode=2;}
 });

@@ -12,7 +12,7 @@ export interface TokenTotals {
 
 /** Kiro's explicit per-turn metadata only. Context occupancy and throughput estimates are not usage. */
 export function turnTokens(meta: Obj, promptId: string): TokenReport | undefined {
-    if (meta.kind !== 'turn_completion' || meta.estimated === true)
+    if (meta.kind !== 'turn_completion' || meta.estimated === true || meta.tokensEstimated === true)
         return;
     const candidates = [meta.tokenUsage, meta.usage, meta.metrics, meta].filter(object);
     const aliases: Record<TokenField, string[]> = {
@@ -27,7 +27,9 @@ export function turnTokens(meta: Obj, promptId: string): TokenReport | undefined
                 continue;
             if (field === 'outputTokens' && (meta.output_tokens_estimated === true || candidate.output_tokens_estimated === true))
                 continue;
-            const value = aliases[field].map(key => candidate[key]).find(value => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0);
+            const value = aliases[field]
+                .filter(key => meta[`${key}Estimated`] !== true && candidate[`${key}Estimated`] !== true)
+                .map(key => candidate[key]).find(value => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0);
             if (typeof value === 'number') { counts[field] = value; break; }
         }
     }
