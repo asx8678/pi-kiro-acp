@@ -78,9 +78,14 @@ export function fabricGuardStatus(): { installed: boolean; ready: boolean; fabri
     const root = path.join(agentDir(), 'npm', 'node_modules', 'pi-fabric');
     if (!fs.existsSync(path.join(root, 'package.json')))
         return { installed: false, ready: true };
+    const recovery = 'In pi-kiro-acp run bun run repair:fabric, then restart Pi. Unreviewed Fabric versions remain blocked.';
+    let fabricVersion: string | undefined;
     try {
-        const manifest: unknown = JSON.parse(fs.readFileSync(path.join(root, '.kiro-acp-policy.json'), 'utf8'));
         const pkg: unknown = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+        fabricVersion = object(pkg) && typeof pkg.version === 'string' ? pkg.version : undefined;
+        if (fabricVersion !== REVIEWED_FABRIC_VERSION)
+            return { installed: true, ready: false, fabricVersion, reason: `Fabric ${fabricVersion ?? 'unknown'} is installed; this bridge requires reviewed Fabric ${REVIEWED_FABRIC_VERSION}. ${recovery}` };
+        const manifest: unknown = JSON.parse(fs.readFileSync(path.join(root, '.kiro-acp-policy.json'), 'utf8'));
         if (!object(manifest) || !object(pkg) || pkg.name !== 'pi-fabric' || manifest.version !== FABRIC_POLICY_VERSION || pkg.version !== REVIEWED_FABRIC_VERSION || pkg.version !== manifest.fabricVersion || !object(manifest.files)
             || Object.keys(manifest.files).length !== FABRIC_PATCH_FILES.length
             || !FABRIC_PATCH_FILES.every(name => Object.hasOwn(manifest.files as Obj, name)))
@@ -97,6 +102,6 @@ export function fabricGuardStatus(): { installed: boolean; ready: boolean; fabri
         return { installed: true, ready: true, fabricVersion: REVIEWED_FABRIC_VERSION };
     }
     catch {
-        return { installed: true, ready: false, reason: 'Fabric routing guard is missing or changed. In pi-kiro-acp run bun run patch:fabric, then restart Pi. A new Fabric version requires review before patching.' };
+        return { installed: true, ready: false, fabricVersion, reason: `Fabric ${fabricVersion ?? 'unknown'} routing guard is missing or changed. ${recovery}` };
     }
 }

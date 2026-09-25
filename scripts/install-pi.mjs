@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from '../dist/src/config.js';
 import { ensureInstallationId } from '../dist/src/installation.js';
+import { repairFabric } from './repair-fabric.mjs';
 
 if (process.argv.length > 2) throw new Error('Usage: bun run install:pi. Select a profile with PI_CODING_AGENT_DIR and PI_KIRO_ACP_CONFIG.');
 const config = loadConfig();
@@ -12,4 +13,5 @@ const result = spawnSync(process.env.PI_BIN || 'pi', ['install', root], { stdio:
 if (result.error) throw result.error;
 if (result.status !== 0) process.exit(result.status ?? 1);
 ensureInstallationId(config);
+repairFabric();
 console.log('Pi extension installed. Its private installation ID is ready and will be reused after updates.');

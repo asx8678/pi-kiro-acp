@@ -1,0 +1,76 @@
+#!/usr/bin/env node
+import fs from 'node:fs';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { agentDir, writePrivateJson } from '../dist/src/config.js';
+import { REVIEWED_FABRIC_VERSION } from '../dist/src/policy/fabric.js';
+
+const patch = fileURLToPath(new URL('./patch-fabric.mjs', import.meta.url));
+const read = file => fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
+const fabricSource = source => typeof source === 'string' && /^npm:pi-fabric(?:@[^/]+)?$/.test(source);
+const runCommand = (command, args, options) => {
+    const result = spawnSync(command, args, { ...options, stdio: 'inherit', shell: false });
+    if (result.error) throw result.error;
+    if (result.status !== 0) throw new Error(`${path.basename(command)} failed (${result.status ?? result.signal}). Fabric repair is incomplete; rerun before starting Pi.`);
+};
+
+// Explicit maintenance only: never download packages or rewrite dispatch code in
+// a running Pi session. The ordinary installer also uses this same workflow.
+export function repairFabric({ dir = agentDir(), run = runCommand, report = console.log } = {}) {
+    const settingsFile = path.join(dir, 'settings.json');
+    const npmDir = path.join(dir, 'npm'), packageFile = path.join(npmDir, 'package.json');
+    const root = path.join(npmDir, 'node_modules/pi-fabric');
+    const settings = read(settingsFile), pkg = read(packageFile);
+    const installed = read(path.join(root, 'package.json'));
+    const selected = (settings.packages ?? []).some(entry => fabricSource(typeof entry === 'string' ? entry : entry?.source));
+    if (!selected && !installed.name) {
+        report('Fabric is not installed or selected; no repair needed.');
+        return;
+    }
+    const version = REVIEWED_FABRIC_VERSION;
+    const needsInstall = installed.name !== 'pi-fabric' || installed.version !== version || pkg.dependencies?.['pi-fabric'] !== version;
+    const command = settings.npmCommand ?? ['npm'];
+    if (needsInstall && (!Array.isArray(command) || !command.length || !command.every(arg => typeof arg === 'string') || !/^(bun|npm)(\.cmd|\.exe)?$/.test(path.basename(command[0]))))
+        throw new Error('Fabric repair requires npmCommand to select npm or bun. No files changed.');
+    const packages = (settings.packages ?? []).map(entry => {
+        if (fabricSource(entry)) return `npm:pi-fabric@${version}`;
+        if (fabricSource(entry?.source)) return { ...entry, source: `npm:pi-fabric@${version}` };
+        return entry;
+    });
+    const settingsChanged = JSON.stringify(packages) !== JSON.stringify(settings.packages ?? []);
+    // Back up only configuration/lockfiles, never credentials. Dispatch originals
+    // are retained by checkedPatch after all source hashes have been validated.
+    if (needsInstall || settingsChanged) {
+        const backup = fs.mkdtempSync(path.join(dir, 'fabric-repair-backup-'));
+        fs.chmodSync(backup, 0o700);
+        for (const [name, file] of [['settings.json', settingsFile], ['package.json', packageFile], ...['bun.lock', 'bun.lockb', 'package-lock.json', 'npm-shrinkwrap.json'].map(name => [name, path.join(npmDir, name)])]) {
+            if (!fs.existsSync(file)) continue;
+            const target = path.join(backup, name);
+            fs.copyFileSync(file, target, fs.constants.COPYFILE_EXCL);
+            fs.chmodSync(target, 0o600);
+        }
+        report(`Fabric configuration backup: ${backup}`);
+    }
+    if (needsInstall) {
+        fs.mkdirSync(npmDir, { recursive: true });
+        const bun = /^bun(\.exe)?$/.test(path.basename(command[0]));
+        run(command[0], [...command.slice(1), ...(bun ? ['add', '--exact'] : ['install', '--save-exact']), '--ignore-scripts', `pi-fabric@${version}`], { cwd: npmDir });
+        const actual = read(path.join(root, 'package.json'));
+        if (actual.name !== 'pi-fabric' || actual.version !== version || read(packageFile).dependencies?.['pi-fabric'] !== version)
+            throw new Error(`Package manager did not install and pin Fabric ${version}. Repair incomplete.`);
+    }
+    run(process.execPath, [patch, root]);
+    run(process.execPath, [patch, root, '--check']);
+    // Publish Pi's selection only after the exact installation passes validation.
+    // Refuse to overwrite settings changed by another process during installation.
+    if (JSON.stringify(read(settingsFile)) !== JSON.stringify(settings))
+        throw new Error('Pi settings changed during Fabric repair. Rerun repair to synchronize the package selection.');
+    if (settingsChanged) writePrivateJson(settingsFile, { ...settings, packages });
+    report(`Fabric ${version} installed, pinned and verified. Restart Pi and existing workers.`);
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+    if (process.argv.length > 2) throw new Error('Usage: bun run repair:fabric. Select a profile with PI_CODING_AGENT_DIR.');
+    repairFabric();
+}

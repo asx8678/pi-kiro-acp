@@ -21,6 +21,10 @@ pi
 ```
 
 Already configured? Skip `init`. To update, pull the latest code, rerun the installer and restart Pi.
+The installer also synchronizes installed Fabric with the bridge's reviewed version,
+pins it in Pi settings and the package manifest, and verifies its routing patch.
+After reinstalling Fabric or rebuilding bridge policy code, run `bun run repair:fabric`
+and restart Pi. This preserves your other Pi settings and refuses unrecognized patch sources.
 
 ## Inside Pi
 

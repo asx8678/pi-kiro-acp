@@ -58,6 +58,11 @@ test('Fabric readiness binds exact reviewed files, package identity and policy a
     save(sameCount); assert.equal(fabricGuardStatus().ready, false);
     save(manifest); fs.appendFileSync(path.join(root, FABRIC_PATCH_FILES[0]), '\n// edited');
     assert.equal(fabricGuardStatus().ready, false);
+    assert.match(fabricGuardStatus().reason!, /routing guard is missing or changed.*repair:fabric/);
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'pi-fabric', version: '0.94.0' }));
+    const mismatch = fabricGuardStatus();
+    assert.equal(mismatch.ready, false); assert.equal(mismatch.fabricVersion, '0.94.0');
+    assert.ok(mismatch.reason?.includes(`requires reviewed Fabric ${REVIEWED_FABRIC_VERSION}`));
 });
 
 test('checked patch validates the complete plan, preserves shebang/backups, and checks without writes', async t => {
@@ -101,4 +106,76 @@ test('efficiency configuration pins reviewed Fabric without changing package fil
     const fovea = path.join(profile, 'npm/node_modules/pi-fovea'); fs.mkdirSync(fovea, { recursive: true });
     fs.writeFileSync(path.join(fovea, 'package.json'), JSON.stringify({ name: 'pi-fovea', version: 'unknown' }));
     assert.notEqual(run().status, 0); assert.equal(fs.readFileSync(settingsFile, 'utf8'), settings);
+});
+
+test('Fabric repair synchronizes old pins, preserves settings and becomes install-idempotent', async t => {
+    const { repairFabric } = await import(new URL('../../scripts/repair-fabric.mjs', import.meta.url).href);
+    const dir = temporary(t), npmDir = path.join(dir, 'npm'), root = path.join(npmDir, 'node_modules/pi-fabric');
+    fs.mkdirSync(root, { recursive: true });
+    const settingsFile = path.join(dir, 'settings.json'), packageFile = path.join(npmDir, 'package.json');
+    const settings = { npmCommand: ['bun'], theme: 'custom', defaultModel: 'chosen', packages: [
+        'npm:pi-fabric@0.94.0', { source: 'npm:pi-fabric', extensions: ['dist/index.js'], skills: [] }, 'npm:unrelated',
+    ] };
+    const pkg = { private: true, dependencies: { 'pi-fabric': '^0.94.0', 'pi-fovea': '0.31.1' } };
+    fs.writeFileSync(settingsFile, JSON.stringify(settings));
+    fs.writeFileSync(packageFile, JSON.stringify(pkg));
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'pi-fabric', version: '0.94.0' }));
+    fs.writeFileSync(path.join(npmDir, 'bun.lock'), 'original lock');
+    let installs = 0, patches = 0, checks = 0;
+    const run = (command: string, args: string[], options?: { cwd: string }) => {
+        if (command === 'bun') {
+            installs++;
+            assert.deepEqual(args, ['add', '--exact', '--ignore-scripts', `pi-fabric@${REVIEWED_FABRIC_VERSION}`]);
+            assert.equal(options?.cwd, npmDir);
+            fs.writeFileSync(packageFile, JSON.stringify({ ...pkg, dependencies: { ...pkg.dependencies, 'pi-fabric': REVIEWED_FABRIC_VERSION } }));
+            fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'pi-fabric', version: REVIEWED_FABRIC_VERSION }));
+        } else {
+            assert.equal(command, process.execPath); assert.equal(args[1], root);
+            assert.ok(args[0]?.endsWith('/patch-fabric.mjs'));
+            if (args.includes('--check')) checks++; else patches++;
+        }
+    };
+    const options = { dir, run, report: () => {} };
+    repairFabric(options);
+    assert.deepEqual(JSON.parse(fs.readFileSync(settingsFile, 'utf8')), { ...settings, packages: [
+        `npm:pi-fabric@${REVIEWED_FABRIC_VERSION}`, { ...settings.packages[1] as object, source: `npm:pi-fabric@${REVIEWED_FABRIC_VERSION}` }, 'npm:unrelated',
+    ] });
+    const backups = () => fs.readdirSync(dir).filter(name => name.startsWith('fabric-repair-backup-'));
+    assert.equal(backups().length, 1);
+    const backup = path.join(dir, backups()[0]!);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(backup, 'settings.json'), 'utf8')), settings);
+    assert.equal(fs.readFileSync(path.join(backup, 'bun.lock'), 'utf8'), 'original lock');
+    if (process.platform !== 'win32') assert.equal(fs.statSync(backup).mode & 0o777, 0o700);
+    repairFabric(options);
+    assert.equal(installs, 1); assert.equal(patches, 2); assert.equal(checks, 2); assert.equal(backups().length, 1);
+});
+
+test('Fabric repair refuses failed patches and concurrent settings edits before publishing its pin', async t => {
+    const { repairFabric } = await import(new URL('../../scripts/repair-fabric.mjs', import.meta.url).href);
+    const dir = temporary(t), root = path.join(dir, 'npm/node_modules/pi-fabric');
+    fs.mkdirSync(root, { recursive: true });
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'pi-fabric', version: REVIEWED_FABRIC_VERSION }));
+    fs.writeFileSync(path.join(dir, 'npm/package.json'), JSON.stringify({ dependencies: { 'pi-fabric': REVIEWED_FABRIC_VERSION } }));
+    const settingsFile = path.join(dir, 'settings.json'), original = JSON.stringify({ packages: ['npm:pi-fabric@0.94.0'] });
+    fs.writeFileSync(settingsFile, original);
+    assert.throws(() => repairFabric({ dir, report: () => {}, run: () => { throw new Error('Unrecognized code'); } }), /Unrecognized/);
+    assert.equal(fs.readFileSync(settingsFile, 'utf8'), original);
+    const concurrent = JSON.stringify({ packages: ['npm:pi-fabric@0.94.0'], theme: 'changed' });
+    assert.throws(() => repairFabric({ dir, report: () => {}, run: () => { fs.writeFileSync(settingsFile, concurrent); } }), /settings changed/);
+    assert.equal(fs.readFileSync(settingsFile, 'utf8'), concurrent);
+});
+
+test('Fabric repair skips absent Fabric and does not publish a pin after a failed install', async t => {
+    const { repairFabric } = await import(new URL('../../scripts/repair-fabric.mjs', import.meta.url).href);
+    const dir = temporary(t), settingsFile = path.join(dir, 'settings.json');
+    repairFabric({ dir, report: () => {}, run: () => assert.fail('Fabric is optional') });
+    assert.deepEqual(fs.readdirSync(dir), []);
+    const original = JSON.stringify({ packages: ['npm:pi-fabric@0.94.0'] });
+    fs.writeFileSync(settingsFile, original);
+    assert.throws(() => repairFabric({ dir, report: () => {}, run: (command: string, args: string[]) => {
+        assert.equal(command, 'npm');
+        assert.deepEqual(args, ['install', '--save-exact', '--ignore-scripts', `pi-fabric@${REVIEWED_FABRIC_VERSION}`]);
+        throw new Error('download failed');
+    } }), /download failed/);
+    assert.equal(fs.readFileSync(settingsFile, 'utf8'), original);
 });

@@ -224,7 +224,7 @@ From this repository:
 
 ```sh
 bun run build
-bun run patch:fabric
+bun run repair:fabric
 bun run patch:fovea  # when Fovea is installed
 bun run configure:efficiency
 ```
@@ -246,7 +246,16 @@ The bridge checks the exact manifest paths, package version and policy artifact
 hash before serving inference or allowing `fabric_exec`. After rebuilding changed
 policy code, rerun the patch. The former 0.94.0 patch is no longer the current target.
 
-A reinstall can remove the patch; rerun `patch:fabric` and restart Pi. A different
+A reinstall can remove the patch; run `bun run repair:fabric` and restart Pi. This
+maintenance command synchronizes the installed package, exact npm dependency and
+Pi package selection with the bridge's reviewed version, then applies and checks
+the patch. It saves private configuration/lockfile backups and preserves other
+settings, including package resource filters. It can upgrade or downgrade Fabric
+to that reviewed version; it never selects the latest unreviewed release. The
+normal `install:pi` workflow also runs this repair when Fabric is selected or installed.
+Startup reports a mismatch before the first prompt; dispatch remains blocked until
+repair succeeds. Stop Pi before maintenance and restart existing workers afterward.
+A different
 Fabric version is rejected until its dispatch paths are reviewed. This protects
 the reviewed built-in Fabric paths; it is not an operating-system network sandbox
 for arbitrary extensions, MCP servers or shell commands. Strict Kiro native-tool

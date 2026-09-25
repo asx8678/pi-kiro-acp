@@ -106,6 +106,10 @@ export async function installExtension(pi: PiPort, ai: PiAiPort, tui?: UsageUiPo
         }
     }
     pi.on('session_start', (_e, ctx) => { bind(ctx);
+        if (config.policy.kiroOnly) {
+            const status = fabricGuardStatus();
+            if (!status.ready) ctx.ui?.notify(status.reason!, 'error');
+        }
         if (ctx.mode === 'tui' && !process.env.PI_FABRIC_DEPTH) void runtime.refreshAccountUsage().catch(() => {});
         if (!warned) {
         warned = true;
