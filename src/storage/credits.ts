@@ -6,7 +6,7 @@ import { BridgeError, redact } from '../errors.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { uid } from '../util.js';
-import { dayRange, localDay, monthDays, monthRange, shiftMonth, validDay, validMonth } from '../diagnostics/calendar.js';
+import { dayRange, localDay, monthDayRanges, monthRange, shiftMonth, validDay, validMonth } from '../diagnostics/calendar.js';
 import type { AccountUsage } from '../kiro/account-usage.js';
 
 interface TaskRow {
@@ -18,16 +18,41 @@ export interface TaskDetails { sessionId: string; sessionName?: string; summary:
 export interface UsageTotals { credits: number | null; prompts: number; unreported: number; unfinished: number }
 export interface DayUsage extends UsageTotals { day: string }
 export interface SessionUsage extends UsageTotals { id: string; name: string; startedAt: number; tasks: number; summary: string }
-export interface TaskUsage extends UsageTotals { id: string; summary: string; outcome: string; startedAt: number; finishedAt: number | null; resultSummary: string | null }
+export interface TaskUsage extends UsageTotals { id: string; kind: 'task' | 'prompt'; summary: string; outcome: string; startedAt: number; finishedAt: number | null; resultSummary: string | null }
 
 /** Shared accounting with bounded task/result excerpts; never stores full transcripts. */
 export class CreditLedger {
     readonly logFile: string;
     private activeTask?: string;
+    private cache = new Map<string, unknown>();
+    private cacheVersion = '';
+    private cached<T>(key: string, load: () => T): T {
+        // Uncommitted views must neither reuse nor populate committed-data caches.
+        if (this.journal.inTransaction) return load();
+        // Own writes and other SQLite connections invalidate independently. No timer
+        // can leave a corrected credit report hidden behind a stale aggregate.
+        const row = this.journal.db.prepare('SELECT total_changes() AS local, data_version AS remote FROM pragma_data_version').get()!;
+        const version = `${row.local}:${row.remote}`;
+        if (version !== this.cacheVersion) { this.cache.clear(); this.cacheVersion = version; }
+        if (this.cache.has(key)) return structuredClone(this.cache.get(key)) as T;
+        const value = load();
+        const after = this.journal.db.prepare('SELECT total_changes() AS local, data_version AS remote FROM pragma_data_version').get()!;
+        const afterVersion = `${after.local}:${after.remote}`;
+        if (afterVersion === version) {
+            if (this.cache.size >= 128) this.cache.clear();
+            this.cache.set(key, value);
+        } else {
+            // A worker may commit between component reads. Return this observation,
+            // but never cache a mixed-age view as if it belonged to the newer revision.
+            this.cache.clear(); this.cacheVersion = afterVersion;
+        }
+        // Public views must not let caller mutation alter subsequent accounting reads.
+        return structuredClone(value);
+    }
     private taskBySession = new Map<string, string>();
     private ownedTasks = new Set<string>();
     private readonly inheritedTask = process.env.PI_KIRO_CREDIT_OWNER_PID !== String(process.pid) ? process.env.PI_KIRO_CREDIT_TASK_ID : undefined;
-    constructor(private journal: Journal, private scope: string, private budget: Config['budget'], readonly timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC') {
+    constructor(private journal: Journal, private scope: string, private budget: Config['budget'], readonly timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', private readonly retainTaskExcerpts = false) {
         this.logFile = path.join(journal.dir, 'usage.jsonl');
         if (fs.existsSync(this.logFile) && fs.lstatSync(this.logFile).isSymbolicLink())
             throw new BridgeError('STORAGE', 'Refusing a symlinked credit log.');
@@ -40,6 +65,7 @@ export class CreditLedger {
             credits REAL, source TEXT, PRIMARY KEY(scope,id));
             CREATE INDEX IF NOT EXISTS credit_prompts_day ON credit_prompts(scope,started_at);
             CREATE INDEX IF NOT EXISTS credit_prompts_owner ON credit_prompts(scope,owner_instance);
+            CREATE INDEX IF NOT EXISTS credit_prompts_usage ON credit_prompts(scope,started_at,credits,finished,owner_instance);
             CREATE TABLE IF NOT EXISTS credit_tasks (
                 scope TEXT NOT NULL, id TEXT NOT NULL, session_id TEXT NOT NULL,
                 session_name TEXT NOT NULL, summary TEXT NOT NULL, started_at INTEGER NOT NULL,
@@ -64,8 +90,9 @@ export class CreditLedger {
     }
     private createTask(details: TaskDetails): string {
         const id = uid('task_');
-        const summary = redact(details.summary).replace(/\s+/g, ' ').trim().slice(0, 300) || 'Provider request';
-        const name = (details.sessionName || `Session ${details.sessionId.slice(0, 12)}`).slice(0, 200);
+        const summary = this.retainTaskExcerpts ? redact(details.summary).replace(/\s+/g, ' ').trim().slice(0, 300) || 'Provider request' : 'Provider request';
+        const name = this.retainTaskExcerpts && details.sessionName
+            ? redact(details.sessionName).slice(0, 200) : `Session ${details.sessionId.slice(0, 12)}`;
         this.journal.db.prepare('INSERT INTO credit_tasks(scope,id,session_id,session_name,summary,started_at) VALUES (?,?,?,?,?,?)')
             .run(this.scope, id, details.sessionId, name, summary, Date.now());
         this.taskBySession.set(details.sessionId, id);
@@ -94,7 +121,7 @@ export class CreditLedger {
     noteResult(summary: string, outcome?: string): void {
         if (this.activeTask && this.ownedTasks.has(this.activeTask))
             this.journal.db.prepare('UPDATE credit_tasks SET result_summary=COALESCE(?,result_summary),outcome=COALESCE(?,outcome) WHERE scope=? AND id=?')
-                .run(summary ? redact(summary).replace(/\s+/g, ' ').trim().slice(0, 500) : null, outcome?.slice(0, 32) ?? null, this.scope, this.activeTask);
+                .run(this.retainTaskExcerpts && summary ? redact(summary).replace(/\s+/g, ' ').trim().slice(0, 500) : null, outcome?.slice(0, 32) ?? null, this.scope, this.activeTask);
     }
     endTask(id = this.activeTask): void {
         if (!id) return;
@@ -135,11 +162,14 @@ export class CreditLedger {
                 JOIN credit_tasks t ON p.scope=t.scope AND p.task_id=t.id WHERE t.scope=? AND t.session_id=?`).get(this.scope, task.session_id);
             const report = {
                 type: 'task_summary', taskId: id, revision: task.revision + 1,
-                sessionId: task.session_id, sessionName: task.session_name,
+                sessionId: task.session_id, sessionName: this.retainTaskExcerpts ? task.session_name : `Session ${task.session_id.slice(0, 12)}`,
                 startedAt: new Date(task.started_at).toISOString(), finishedAt: new Date(task.finished_at).toISOString(),
                 recordedAt: new Date().toISOString(), durationSeconds: Math.round((task.finished_at - task.started_at) / 1000),
-                summary: task.summary, summarySource: 'Local excerpt of the user task; no extra inference',
-                resultSummary: task.result_summary, outcome: task.outcome ?? 'settled',
+                // Late workers can publish older, opted-in tasks. Do not copy their text
+                // to a new report when this writer's retention setting is disabled.
+                summary: this.retainTaskExcerpts ? task.summary : 'Provider request',
+                summarySource: this.retainTaskExcerpts ? 'Local excerpt of the user task; no extra inference' : 'Task excerpts disabled',
+                resultSummary: this.retainTaskExcerpts ? task.result_summary : null, outcome: task.outcome ?? 'settled',
                 credits: totals, byModel: models, sessionCredits: session,
                 tokens: this.taskTokens(id), sessionTokens: this.sessionTokens(task.session_id),
                 includesWorkers: true, scope: this.scope,
@@ -197,21 +227,44 @@ export class CreditLedger {
             .run(this.scope, report.promptId, report.source, Date.now(), ...values);
         this.updateReport(report.promptId);
     }
-    private tokenTotals(where: string, id: string): TokenTotals {
+    private tokenTotals(selection: string, args: (string | number)[]): TokenTotals {
         const row = this.journal.db.prepare(`SELECT COUNT(*) AS prompts,COUNT(u.prompt_id) AS reportedPrompts,
             ${tokenFields.map(field => `SUM(u.${field}) AS ${field},COUNT(u.${field}) AS ${field}Reports`).join(',')}
-            FROM credit_prompts p LEFT JOIN credit_tasks t ON p.scope=t.scope AND p.task_id=t.id
-            LEFT JOIN prompt_tokens u ON p.scope=u.scope AND p.id=u.prompt_id WHERE p.scope=? AND ${where}`)
-            .get(this.scope, id)!;
+            FROM (${selection}) p LEFT JOIN prompt_tokens u ON p.scope=u.scope AND p.id=u.prompt_id`)
+            .get(...args)!;
         const fields: TokenTotals['fields'] = {};
         for (const field of tokenFields)
             if (typeof row[field] === 'number')
                 fields[field] = { tokens: row[field], reportedPrompts: Number(row[`${field}Reports`]) };
         return { prompts: Number(row.prompts), reportedPrompts: Number(row.reportedPrompts), fields };
     }
-    taskTokens(taskId: string): TokenTotals { return this.tokenTotals('p.task_id=?', taskId); }
-    sessionTokens(sessionId: string): TokenTotals { return this.tokenTotals('COALESCE(t.session_id,p.owner_instance)=?', sessionId); }
+    taskTokens(taskId: string, day?: string): TokenTotals {
+        return this.cached(`taskTokens:${JSON.stringify([taskId, day])}`, () => this.tokenTotals(
+            'SELECT scope,id FROM credit_prompts WHERE scope=? AND task_id=?' + (day ? ' AND started_at>=? AND started_at<?' : ''),
+            [this.scope, taskId, ...(day ? dayRange(day, this.timeZone) : [])]));
+    }
+    promptTokens(promptId: string, day?: string): TokenTotals {
+        return this.cached(`promptTokens:${JSON.stringify([promptId, day])}`, () => this.tokenTotals(
+            'SELECT scope,id FROM credit_prompts WHERE scope=? AND id=?' + (day ? ' AND started_at>=? AND started_at<?' : ''),
+            [this.scope, promptId, ...(day ? dayRange(day, this.timeZone) : [])]));
+    }
+    sessionTokens(sessionId: string, day?: string): TokenTotals {
+        // CROSS JOIN fixes the loop order: find this session's tasks first, not all
+        // account prompts. This also works before SQLite has collected statistics.
+        const range = day ? dayRange(day, this.timeZone) : [];
+        const filter = day ? ' AND p.started_at>=? AND p.started_at<?' : '';
+        return this.cached(`sessionTokens:${JSON.stringify([sessionId, day])}`, () => this.tokenTotals(`
+            SELECT p.scope,p.id FROM credit_tasks t CROSS JOIN credit_prompts p ON p.scope=t.scope AND p.task_id=t.id
+            WHERE t.scope=? AND t.session_id=?${filter}
+            UNION ALL
+            SELECT p.scope,p.id FROM credit_prompts p WHERE p.scope=? AND p.owner_instance=?${filter}
+            AND NOT EXISTS (SELECT 1 FROM credit_tasks t WHERE t.scope=p.scope AND t.id=p.task_id)`,
+            [this.scope, sessionId, ...range, this.scope, sessionId, ...range]));
+    }
     tokenUsage(sessionId: string) {
+        return this.cached(`tokenUsage:${sessionId}`, () => this.readTokenUsage(sessionId));
+    }
+    private readTokenUsage(sessionId: string) {
         const last = this.journal.db.prepare(`SELECT id FROM credit_tasks WHERE scope=? AND session_id=? AND finished_at IS NOT NULL
             ORDER BY finished_at DESC,rowid DESC LIMIT 1`).get(this.scope, sessionId);
         return {
@@ -220,6 +273,9 @@ export class CreditLedger {
         };
     }
     snapshot(now = Date.now()) {
+        return this.cached(`snapshot:${localDay(now, this.timeZone)}:${JSON.stringify(this.budget)}`, () => this.readSnapshot(now));
+    }
+    private readSnapshot(now: number) {
         const day = localDay(now, this.timeZone);
         const [start, end] = dayRange(day, this.timeZone);
         const row = this.journal.db.prepare(`SELECT SUM(credits) AS used, COUNT(*) AS prompts,
@@ -254,21 +310,26 @@ export class CreditLedger {
             FROM credit_prompts WHERE scope=? AND started_at>=? AND started_at<?`).get(this.scope, start, end) as unknown as UsageTotals;
     }
     dashboard(selection?: string, now = Date.now()) {
+        return this.cached(`dashboard:${selection ?? ''}:${localDay(now, this.timeZone)}`, () => this.readDashboard(selection, now));
+    }
+    private readDashboard(selection: string | undefined, now: number) {
         const today = localDay(now, this.timeZone), currentMonth = today.slice(0, 7), previousMonth = shiftMonth(currentMonth, -1);
         const selected = selection || currentMonth;
         if (!validMonth(selected) && !validDay(selected)) throw new BridgeError('CONFIG', 'Usage: /usage [YYYY-MM | YYYY-MM-DD | refresh]');
         const month = selected.slice(0, 7), range = monthRange(month, this.timeZone);
-        const dayRows = this.journal.db.prepare(`SELECT kiro_credit_day(started_at) AS day,SUM(credits) AS credits,COUNT(*) AS prompts,
-            COALESCE(SUM(CASE WHEN credits IS NULL THEN 1 ELSE 0 END),0) AS unreported,
-            COALESCE(SUM(CASE WHEN finished=0 THEN 1 ELSE 0 END),0) AS unfinished
-            FROM credit_prompts WHERE scope=? AND started_at>=? AND started_at<? GROUP BY day ORDER BY day`)
-            .all(this.scope, ...range) as unknown as DayUsage[];
-        const days = monthDays(month).map(day => dayRows.find(row => row.day === day) ?? { day, credits: null, prompts: 0, unreported: 0, unfinished: 0 });
+        const bounds = monthDayRanges(month, this.timeZone);
+        const days = this.journal.db.prepare(`WITH days(day,start,end) AS (VALUES ${bounds.map(() => '(?,?,?)').join(',')})
+            SELECT d.day,SUM(p.credits) AS credits,COUNT(p.started_at) AS prompts,
+            SUM(CASE WHEN p.started_at IS NOT NULL AND p.credits IS NULL THEN 1 ELSE 0 END) AS unreported,
+            SUM(CASE WHEN p.finished=0 THEN 1 ELSE 0 END) AS unfinished
+            FROM days d LEFT JOIN credit_prompts p ON p.scope=? AND p.started_at>=d.start AND p.started_at<d.end
+            GROUP BY d.day ORDER BY d.day`)
+            .all(...bounds.flatMap(({ day, start, end }) => [day, start, end]), this.scope) as unknown as DayUsage[];
         let sessions: SessionUsage[] = [];
         if (validDay(selected)) {
             sessions = this.journal.db.prepare(`SELECT COALESCE(t.session_id,p.owner_instance) AS id,
                 COALESCE(MAX(t.session_name),'Unnamed session') AS name,MIN(p.started_at) AS startedAt,
-                COUNT(DISTINCT p.task_id) AS tasks,COALESCE(MIN(t.summary),'Provider request') AS summary,
+                COUNT(DISTINCT CASE WHEN t.id IS NULL THEN 'prompt:'||p.id ELSE 'task:'||t.id END) AS tasks,COALESCE(MIN(t.summary),'Provider request') AS summary,
                 SUM(p.credits) AS credits,COUNT(*) AS prompts,
                 COALESCE(SUM(CASE WHEN p.credits IS NULL THEN 1 ELSE 0 END),0) AS unreported,
                 COALESCE(SUM(CASE WHEN p.finished=0 THEN 1 ELSE 0 END),0) AS unfinished
@@ -288,21 +349,27 @@ export class CreditLedger {
         };
     }
     sessionTasks(day: string, sessionId: string): TaskUsage[] {
-        return this.journal.db.prepare(`SELECT COALESCE(t.id,p.id) AS id,COALESCE(t.summary,'Provider request') AS summary,
-            COALESCE(t.outcome,'unfinished') AS outcome,MIN(p.started_at) AS startedAt,t.finished_at AS finishedAt,t.result_summary AS resultSummary,
+        return this.cached(`sessionTasks:${day}:${sessionId}`, () => this.readSessionTasks(day, sessionId));
+    }
+    private readSessionTasks(day: string, sessionId: string): TaskUsage[] {
+        return this.journal.db.prepare(`SELECT COALESCE(t.id,p.id) AS id,CASE WHEN t.id IS NULL THEN 'prompt' ELSE 'task' END AS kind,COALESCE(t.summary,'Provider request') AS summary,
+            COALESCE(t.outcome,CASE WHEN t.finished_at IS NOT NULL OR (t.id IS NULL AND MIN(p.finished)=1) THEN 'settled' ELSE 'unfinished' END) AS outcome,
+            MIN(p.started_at) AS startedAt,t.finished_at AS finishedAt,t.result_summary AS resultSummary,
             SUM(p.credits) AS credits,COUNT(*) AS prompts,
             COALESCE(SUM(CASE WHEN p.credits IS NULL THEN 1 ELSE 0 END),0) AS unreported,
             COALESCE(SUM(CASE WHEN p.finished=0 THEN 1 ELSE 0 END),0) AS unfinished
             FROM credit_prompts p LEFT JOIN credit_tasks t ON t.scope=p.scope AND t.id=p.task_id
             WHERE p.scope=? AND p.started_at>=? AND p.started_at<? AND COALESCE(t.session_id,p.owner_instance)=?
-            GROUP BY COALESCE(t.id,p.id) ORDER BY startedAt`)
+            GROUP BY t.id IS NULL,COALESCE(t.id,p.id) ORDER BY startedAt,id`)
             .all(this.scope, ...dayRange(day, this.timeZone), sessionId) as unknown as TaskUsage[];
     }
     assertAvailable(): void {
         if (!this.budget.dailyCredits)
             return;
-        const usage = this.snapshot();
-        if (usage.exhausted)
-            throw new BridgeError('LIMIT', `Daily Kiro budget reached: ${usage.reportedCredits} / ${usage.dailyLimit} credits (${usage.day}, ${this.timeZone}). New requests and continuations are blocked; already-running inference may still report credits.`);
+        const day = localDay(Date.now(), this.timeZone);
+        const row = this.journal.db.prepare('SELECT SUM(credits) AS used FROM credit_prompts WHERE scope=? AND started_at>=? AND started_at<?')
+            .get(this.scope, ...dayRange(day, this.timeZone)) as { used: number | null };
+        if ((row.used ?? 0) >= this.budget.dailyCredits)
+            throw new BridgeError('LIMIT', `Daily Kiro budget reached: ${row.used} / ${this.budget.dailyCredits} credits (${day}, ${this.timeZone}). New requests and continuations are blocked; already-running inference may still report credits.`);
     }
 }

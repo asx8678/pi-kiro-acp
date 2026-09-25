@@ -139,7 +139,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
         }
         const journal = new Journal(config.stateDir);
         try {
-            const data = new CreditLedger(journal, config.admission.scope, config.budget, config.reporting.timeZone).dashboard(selected);
+            const data = new CreditLedger(journal, config.admission.scope, config.budget, config.reporting.timeZone, config.reporting.retainTaskExcerpts).dashboard(selected);
             console.log(args.includes('--json') ? JSON.stringify(data, null, 2) : dashboardText(data));
         }
         finally { journal.close(); }

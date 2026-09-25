@@ -19,6 +19,7 @@ export declare class ProviderRuntime {
     private resetting;
     private fallbackSession;
     private closed;
+    private cleanupFailure?;
     private idleTimer;
     private lifetime;
     private inFlight;

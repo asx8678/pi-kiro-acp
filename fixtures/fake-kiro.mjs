@@ -15,8 +15,9 @@ const notify=(method,params)=>output({method,params});
 const update=(kind,extra)=>notify('session/update',{sessionId:session.id,update:{sessionUpdate:kind,...extra}});
 function options(){return {configOptions:[
   {id:'model',category:'model',type:'select',name:'Model',currentValue:session.model,options:[{value:'auto',name:'Auto'},{value:'test-opus',name:'Test Opus'}]},
-  {id:'effortLevel',category:'thought_level',type:'select',name:'Effort',currentValue:session.effort,options:[{value:'low',name:'Low'},{value:'medium',name:'Medium'},{value:'high',name:'High'}]},
+  {id:args.includes('--renamed-effort')?'reasoningDepth':'effortLevel',category:'thought_level',type:'select',name:'Effort',currentValue:session.effort,options:[{value:'low',name:'Low'},{value:'medium',name:'Medium'},{value:'high',name:'High'}]},
 ]};}
+function initialOptions(){return args.includes('--delayed-catalog')||args.includes('--missing-catalog')||args.includes('--catalog-gate')?{}:options();}
 async function mcp(method,params,signal,id){
   const d=session.mcp;if(!d)throw new Error('No MCP');const url=new URL(d.url);
   if(url.hostname!=='127.0.0.1')throw new Error('Fixture refuses non-loopback URLs');
@@ -44,7 +45,7 @@ async function handle(f){
         }
         notify('_kiro/tools/didChange',{sessionId:session.id,tags:[{tag:'shell',source:'builtin'},...session.tools.map(t=>({tag:'@kirocrew-core/'+t.name,source:'mcp'}))]});
       }
-      reply(f.id,{sessionId:session.id,...options(),modes:{currentModeId:'default',availableModes:[{id:agent.id,name:'Kiro Crew'}]}});break;
+      reply(f.id,{sessionId:session.id,...initialOptions(),modes:{currentModeId:'default',availableModes:[{id:agent.id,name:'Kiro Crew'}]}});break;
     }
     case 'session/set_mode':{
       if(p.modeId!==session.agent.id)throw new Error('Unknown agent');session.mode=p.modeId;
@@ -53,11 +54,20 @@ async function handle(f){
         notify('_kiro/tools/didChange',{sessionId:session.id,tags:[...session.tools.map(t=>({tag:'@kirocrew-core/'+t.name,source:'mcp'})),...(args.includes('--extra-tool')?[{tag:'shell',source:'builtin'}]:[])]});
       else
         notify('_kiro/tools/didChange',{sessionId:session.id,tools:[...session.tools.map(t=>({name:'mcp__kirocrew-core__'+t.name})),...(args.includes('--extra-tool')?[{name:'shell'}]:[])]});
-      reply(f.id,{...options(),modes:{currentModeId:session.mode}});break;
+      reply(f.id,{...initialOptions(),modes:{currentModeId:session.mode}});
+      if(args.includes('--delayed-catalog'))setTimeout(()=>update('config_option_update',options()),75);
+      if(args.includes('--catalog-gate')){
+        const gate=args[args.indexOf('--catalog-gate')+1];
+        fs.writeFileSync(gate+'.ready',String(process.pid));
+        const timer=setInterval(()=>{if(fs.existsSync(gate)){clearInterval(timer);update('config_option_update',options());}},10);
+      }
+      break;
     }
     case 'session/set_config_option':{
-      if(p.configId==='model')session.model=p.value;else if(p.configId==='effortLevel')session.effort=p.value;
-      else throw new Error('Unknown configuration option');reply(f.id,options());
+      if(p.configId==='model')session.model=p.value;else if(p.configId===(args.includes('--renamed-effort')?'reasoningDepth':'effortLevel'))session.effort=p.value;
+      else throw new Error('Unknown configuration option');
+      if(args.includes('--delayed-selection')){reply(f.id,{});setTimeout(()=>update('config_option_update',options()),75);}
+      else reply(f.id,options());
       if(args.includes('--stall-after-select')){reader.pause();process.stdin.pause();}
       break;
     }
@@ -70,6 +80,7 @@ async function handle(f){
       try{
         const text=p.prompt.map(b=>b.text).join('\n');session.history.push(text);
         if(text.includes('MODEL_FALLBACK')){session.model='auto';update('config_option_update',options());}
+        if(text.includes('EFFORT_FALLBACK')){session.effort='low';update('config_option_update',options());}
         if(text.includes('MALFORMED_FRAME')){process.stdout.write('not valid json\n');break;}
         if(text.includes('NATIVE_EFFECT')){
           const id='reverse-'+(++sequence);const wait=new Promise(resolve=>reverse.set(id,resolve));
@@ -83,8 +94,10 @@ async function handle(f){
           for(let i=0;i<n;i++){
             const tool=session.tools[0];if(!tool)throw new Error('No tool available');
             const id=++sequence;
-            const request=mcp('tools/call',{name:tool.name,arguments:{value:'hello',iteration:i}},ctl.signal,id);
-            const duplicate=text.includes('DUPLICATE_TOOL_REQUEST')?mcp('tools/call',{name:tool.name,arguments:{value:'hello',iteration:i}},ctl.signal,id):undefined;
+            const argumentFile=args.indexOf('--tool-arguments-file');
+            const toolArguments=argumentFile<0?{value:'hello',iteration:i}:JSON.parse(fs.readFileSync(args[argumentFile+1],'utf8'));
+            const request=mcp('tools/call',{name:tool.name,arguments:toolArguments},ctl.signal,id);
+            const duplicate=text.includes('DUPLICATE_TOOL_REQUEST')?mcp('tools/call',{name:tool.name,arguments:toolArguments},ctl.signal,id):undefined;
             const result=await request;if(duplicate)await duplicate;
             update('agent_message_chunk',{content:{type:'text',text:`Tool ${i+1}: ${result.isError?'error':'ok'} ${result.content.map(c=>c.text).join(' ')}. `}});
           }
@@ -93,6 +106,8 @@ async function handle(f){
           update('agent_message_chunk',{content:{type:'text',text:`[${session.model}] ${historicalResult?'Resynchronized from Pi history without repeating its tool.':text.slice(-256)}`}});
         }
         reply(f.id,{stopReason:'end_turn'});
+        if(args.includes('--idle-model-change')&&session.model==='test-opus')
+          setTimeout(()=>{session.model='auto';update('config_option_update',options());},50);
       }catch(e){reply(f.id,{stopReason:ctl.signal.aborted?'cancelled':'end_turn'});}
       finally{running.delete(f.id);}break;
     }

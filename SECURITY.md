@@ -37,9 +37,22 @@ Kiro's internal system prompt or guarantee a single underlying model invocation.
 
 The trusted configuration is owner-private. The state directory is mode 0700;
 configuration and catalog files and the SQLite database are mode 0600 on POSIX.
-The journal stores handoff IDs, Pi call IDs, model-independent binding hashes,
-argument/result hashes, process ownership, phase and timestamps. It does not
-store raw tool arguments, output bodies, prompts or credentials.
+The handoff journal stores IDs, model-independent binding hashes, argument/result
+hashes, process ownership, phase and timestamps, not raw tool arguments or bodies.
+The accounting tables and `usage.jsonl` retain IDs, timestamps, outcomes and usage
+totals. By default, task/response excerpts and supplied session names are **not**
+persisted; reports use generic task labels and ID-derived session names.
+
+Setting `reporting.retainTaskExcerpts: true` explicitly opts into storing bounded
+user-task excerpts, final-response excerpts and supplied session names in both
+SQLite and task reports. Basic credential redaction is defense in depth, not a
+secret detector: arbitrary API keys, personal information and source text can
+remain in opted-in excerpts. Keep this disabled for sensitive work.
+
+Changing the setting does not scrub existing databases, logs, backups or reports
+written by older/running versions. Stop or restart all bridge/worker processes
+when changing retention policy, then review historical copies separately. Do not
+delete unresolved handoff/recovery state just to remove old accounting excerpts.
 
 Raw Kiro stderr is drained but not retained because it may contain secrets.
 Provider-event observers receive normalized content and accounting observations;

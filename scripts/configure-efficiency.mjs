@@ -1,12 +1,17 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { agentDir, configPath, loadConfig, parseConfig, writePrivateJson } from '../dist/src/config.js';
 import { readCatalog, withContextWindow } from '../dist/src/provider/models.js';
-import { WORKER_LIMITS, fabricGuardStatus } from '../dist/src/policy/fabric.js';
+import { WORKER_LIMITS, REVIEWED_FABRIC_VERSION, fabricGuardStatus } from '../dist/src/policy/fabric.js';
 
 const guard = fabricGuardStatus();
 if (guard.installed && !guard.ready) throw new Error(guard.reason);
 const dir = agentDir();
+const foveaPackage = path.join(dir, 'npm/node_modules/pi-fovea');
+if (fs.existsSync(path.join(foveaPackage, 'package.json')))
+    execFileSync(process.execPath, [fileURLToPath(new URL('./patch-fovea.mjs', import.meta.url)), foveaPackage, '--check'], { stdio: 'pipe' });
 const read = (file) => fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
 const config = loadConfig();
 config.models.workerId = 'auto';
@@ -24,8 +29,8 @@ const settingsFile = path.join(dir, 'settings.json');
 const settings = read(settingsFile);
 settings.npmCommand = ['bun'];
 settings.packages = (settings.packages ?? []).map(entry => {
-    if (typeof entry === 'string' && /^npm:pi-fabric(?:@[^/]+)?$/.test(entry)) return 'npm:pi-fabric@0.94.0';
-    if (entry && typeof entry === 'object' && typeof entry.source === 'string' && /^npm:pi-fabric(?:@[^/]+)?$/.test(entry.source)) return { ...entry, source: 'npm:pi-fabric@0.94.0' };
+    if (typeof entry === 'string' && /^npm:pi-fabric(?:@[^/]+)?$/.test(entry)) return `npm:pi-fabric@${guard.fabricVersion ?? REVIEWED_FABRIC_VERSION}`;
+    if (entry && typeof entry === 'object' && typeof entry.source === 'string' && /^npm:pi-fabric(?:@[^/]+)?$/.test(entry.source)) return { ...entry, source: `npm:pi-fabric@${guard.fabricVersion ?? REVIEWED_FABRIC_VERSION}` };
     return entry;
 });
 settings.defaultProvider = 'kiro-acp';

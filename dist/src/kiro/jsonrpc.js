@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { TextDecoder } from 'node:util';
 import { BridgeError, cancelled, throwIfAborted, asError } from '../errors.js';
 import { deferred, object } from '../util.js';
+import { closeOwnedProcess, signalOwnedProcess } from './process.js';
 export class RpcRemoteError extends BridgeError {
     rpcCode;
     constructor(rpcCode, message) {
@@ -14,21 +15,53 @@ export class Ndjson {
     maxBytes;
     onFrame;
     decoder = new TextDecoder('utf-8', { fatal: true });
-    buffer = '';
+    buffer = Buffer.alloc(0);
+    length = 0;
+    firstLine = true;
     constructor(maxBytes, onFrame) {
         this.maxBytes = maxBytes;
         this.onFrame = onFrame;
     }
+    append(chunk) {
+        const length = this.length + chunk.length;
+        // One extra CR is permitted as part of a possibly split CRLF delimiter.
+        const last = chunk.length ? chunk[chunk.length - 1] : this.buffer[this.length - 1];
+        if (length > this.maxBytes + (last === 13 ? 1 : 0))
+            throw new BridgeError('LIMIT', 'ACP frame exceeds limit.');
+        if (length > this.buffer.length) {
+            // Geometric growth bounds copies to O(frame bytes), even for byte-sized chunks.
+            const next = Buffer.allocUnsafe(Math.min(this.maxBytes + 1, Math.max(4096, length, this.buffer.length * 2)));
+            this.buffer.copy(next, 0, 0, this.length);
+            this.buffer = next;
+        }
+        this.buffer.set(chunk, this.length);
+        this.length = length;
+    }
     push(chunk) {
-        this.buffer += this.decoder.decode(chunk, { stream: true });
-        let end;
-        while ((end = this.buffer.indexOf('\n')) >= 0) {
-            const line = this.buffer.slice(0, end).replace(/\r$/, '');
-            this.buffer = this.buffer.slice(end + 1);
+        // Validate each byte exactly once, preserving immediate strict UTF-8 failures.
+        this.decoder.decode(chunk, { stream: true });
+        let start = 0;
+        while (start < chunk.length) {
+            const end = chunk.indexOf(10, start);
+            this.append(chunk.subarray(start, end < 0 ? chunk.length : end));
+            if (end < 0)
+                break;
+            let line = this.buffer.toString('utf8', 0, this.length);
+            const bytes = this.length - (line.endsWith('\r') ? 1 : 0);
+            this.length = 0;
+            // An unusually large frame must not pin a large buffer in an idle session.
+            if (this.buffer.length > 65536)
+                this.buffer = Buffer.alloc(0);
+            if (this.firstLine) {
+                this.firstLine = false;
+                if (line.charCodeAt(0) === 0xfeff)
+                    line = line.slice(1);
+            }
+            if (line.endsWith('\r'))
+                line = line.slice(0, -1);
+            start = end + 1;
             if (!line.trim())
                 continue;
-            if (Buffer.byteLength(line) > this.maxBytes)
-                throw new BridgeError('LIMIT', 'ACP frame exceeds limit.');
             let data;
             try {
                 data = JSON.parse(line);
@@ -40,14 +73,12 @@ export class Ndjson {
                 throw new BridgeError('PROTOCOL', 'Invalid JSON-RPC envelope.');
             if ('id' in data && typeof data.id !== 'string' && typeof data.id !== 'number')
                 throw new BridgeError('PROTOCOL', 'Invalid JSON-RPC request ID.');
-            this.onFrame(data);
+            this.onFrame(data, bytes);
         }
-        if (Buffer.byteLength(this.buffer) > this.maxBytes)
-            throw new BridgeError('LIMIT', 'Unterminated ACP frame exceeds limit.');
     }
     end() {
-        this.buffer += this.decoder.decode();
-        if (this.buffer.trim())
+        this.decoder.decode();
+        if (this.buffer.toString('utf8', 0, this.length).trim())
             throw new BridgeError('PROTOCOL', 'Truncated ACP frame at EOF.');
     }
 }
@@ -81,7 +112,7 @@ export class RpcProcess {
         this.child = spawn(this.config.cli.binary, [...this.config.cli.prefixArgs, 'acp', '--agent-engine', 'v3', '--auth-method', 'cli'], {
             cwd: this.cwd, env, stdio: ['pipe', 'pipe', 'pipe'], shell: false, detached: process.platform !== 'win32',
         });
-        const parser = new Ndjson(this.config.limits.maxFrameBytes, f => this.receive(f));
+        const parser = new Ndjson(this.config.limits.maxFrameBytes, (f, bytes) => this.receive(f, bytes));
         this.child.stdout.on('data', (c) => {
             try {
                 parser.push(c);
@@ -139,12 +170,12 @@ export class RpcProcess {
         return d.promise;
     }
     notify(method, params) { return this.send({ jsonrpc: '2.0', method, params }); }
-    receive(frame) {
+    receive(frame, bytes) {
         if (this.closed)
             return;
         if (frame.method) {
             if (frame.id === undefined) {
-                this.onNotification(frame.method, frame.params);
+                this.onNotification(frame.method, frame.params, bytes);
                 return;
             }
             const id = frame.id;
@@ -188,20 +219,9 @@ export class RpcProcess {
             p.reject(e);
         }
         this.pending.clear();
-        this.terminate('SIGTERM');
+        if (this.child)
+            signalOwnedProcess(this.child, 'SIGTERM');
         this.onFailure(e);
-    }
-    terminate(signal) {
-        const pid = this.child?.pid;
-        if (!pid)
-            return;
-        try {
-            if (process.platform !== 'win32')
-                process.kill(-pid, signal);
-            else
-                this.child?.kill(signal);
-        }
-        catch { /* already gone */ }
     }
     closeTask;
     close(graceMs = this.config.cli.cancelGraceMs) { return this.closeTask ??= this.doClose(graceMs); }
@@ -218,53 +238,46 @@ export class RpcProcess {
             }
             this.pending.clear();
         }
-        this.terminate('SIGTERM');
-        const timeout = setTimeout(() => this.terminate('SIGKILL'), Math.max(0, graceMs));
-        try {
-            await this.closeResult.promise;
-        }
-        finally {
-            clearTimeout(timeout);
-        }
+        await closeOwnedProcess(this.child, this.closeResult.promise, graceMs);
     }
     get pid() { return this.child?.pid; }
 }
 export async function inspectCli(config, signal) {
     async function run(args) {
         throwIfAborted(signal);
-        return new Promise((resolve, reject) => {
-            const child = spawn(config.cli.binary, [...config.cli.prefixArgs, ...args], { stdio: ['ignore', 'pipe', 'pipe'], shell: false });
-            let out = '', size = 0, failed = false;
-            const fail = (e) => {
-                if (failed)
-                    return;
-                failed = true;
-                child.kill('SIGKILL');
-                reject(e);
-            };
-            const abort = () => fail(cancelled());
-            signal?.addEventListener('abort', abort, { once: true });
-            const timer = setTimeout(() => fail(new BridgeError('TIMEOUT', 'Kiro CLI inspection timed out.')), config.cli.rpcTimeoutMs);
-            child.stdout.on('data', (c) => {
-                size += c.length;
-                if (size > 131072)
-                    fail(new BridgeError('LIMIT', 'CLI inspection output too large.'));
-                else
-                    out += c.toString('utf8');
-            });
-            child.stderr.on('data', () => { });
-            child.on('error', e => { clearTimeout(timer); fail(new BridgeError('TRANSPORT', `Kiro CLI is unavailable: ${e.message}`)); });
-            child.on('close', code => {
-                clearTimeout(timer);
-                signal?.removeEventListener('abort', abort);
-                if (failed)
-                    return;
-                if (code !== 0)
-                    reject(new BridgeError('COMPATIBILITY', `Kiro ${args.join(' ')} failed (${code}).`));
-                else
-                    resolve(out.trim());
-            });
+        const child = spawn(config.cli.binary, [...config.cli.prefixArgs, ...args], {
+            stdio: ['ignore', 'pipe', 'pipe'], shell: false, detached: process.platform !== 'win32',
         });
+        const done = deferred(), closed = deferred();
+        let out = '', size = 0;
+        const abort = () => done.reject(cancelled());
+        signal?.addEventListener('abort', abort, { once: true });
+        const timer = setTimeout(() => done.reject(new BridgeError('TIMEOUT', 'Kiro CLI inspection timed out.')), config.cli.rpcTimeoutMs);
+        child.stdout.on('data', (chunk) => {
+            size += chunk.length;
+            if (size > 131072)
+                done.reject(new BridgeError('LIMIT', 'CLI inspection output too large.'));
+            else
+                out += chunk.toString('utf8');
+        });
+        child.stderr.on('data', () => { });
+        child.on('error', error => done.reject(new BridgeError('TRANSPORT', `Kiro CLI is unavailable: ${error.message}`)));
+        child.on('close', code => {
+            closed.resolve();
+            if (code !== 0)
+                done.reject(new BridgeError('COMPATIBILITY', `Kiro ${args.join(' ')} failed (${code}).`));
+            else
+                done.resolve(out.trim());
+        });
+        try {
+            return await done.promise;
+        }
+        finally {
+            clearTimeout(timer);
+            signal?.removeEventListener('abort', abort);
+            // Also clean surviving descendants after a successful parent exit.
+            await closeOwnedProcess(child, closed.promise, config.cli.cancelGraceMs);
+        }
     }
     const version = await run(['--version']), help = await run(['acp', '--help']);
     if (!help.includes('--agent-engine') || !help.includes('--auth-method'))

@@ -70,10 +70,13 @@ export async function installExtension(pi: PiPort, ai: PiAiPort, tui?: UsageUiPo
     let usageSessionId = runtime.journal.instance;
     let shownWidget: string | undefined;
     const creditWarnings = new Set<string>();
+    let creditUpdate: NodeJS.Timeout | undefined;
     const showCredits = () => {
+        clearTimeout(creditUpdate); creditUpdate = undefined;
         if (!creditsUI || runtime.journal.closed)
             return;
-        const status = runtime.metrics.creditStatus();
+        const usage = runtime.credits.snapshot();
+        const status = runtime.metrics.creditStatus(usage);
         const tokens = runtime.credits.tokenUsage(usageSessionId);
         if (creditsUI.setWidget && tokens.lastPrompt) {
             const lines = [status, `Last prompt tokens: ${tokenText(tokens.lastPrompt)}`, `Session tokens: ${tokenText(tokens.session)}`];
@@ -88,22 +91,26 @@ export async function installExtension(pi: PiPort, ai: PiAiPort, tui?: UsageUiPo
             shownWidget = undefined;
             creditsUI.setStatus?.('kiro-credits', status);
         }
-        const usage = runtime.credits.snapshot();
         const key = `${usage.day}:${usage.warningCredits}`;
         if (usage.warning && !creditWarnings.has(key)) {
             creditWarnings.add(key);
             creditsUI.notify(`Kiro has reported ${usage.reportedCredits?.toFixed(4)} credits today, above the ${usage.warningCredits}-credit warning threshold. ${usage.dailyLimit === null ? 'No spending cutoff is enabled.' : 'An explicit daily cutoff is configured.'} Task reports: ${usage.logFile}`, 'warning');
         }
     };
-    // Reads the shared ledger only; no catalog refresh or inference for worker totals.
-    const creditTimer = setInterval(showCredits, 5000);
+    const scheduleCredits = () => {
+        if (creditUpdate || runtime.journal.closed) return;
+        creditUpdate = setTimeout(showCredits, 50);
+        creditUpdate.unref();
+    };
+    // Coalesce same-turn accounting reports and poll cross-process worker totals.
+    const creditTimer = setInterval(scheduleCredits, 5000);
     creditTimer.unref();
-    runtime.metrics.onCredits = showCredits;
+    runtime.metrics.onCredits = scheduleCredits;
     function bind(ctx: HostContext): void {
         runtime.setHost(ctx);
         creditsUI = ctx.ui;
         usageSessionId = ctx.sessionManager?.getSessionId?.() || runtime.journal.instance;
-        showCredits();
+        scheduleCredits();
     }
     function guard(ctx: HostContext): void {
         bind(ctx);
@@ -167,6 +174,7 @@ export async function installExtension(pi: PiPort, ai: PiAiPort, tui?: UsageUiPo
     pi.on('session_tree', async () => { await runtime.invalidate(); });
     pi.on('session_shutdown', async () => {
         clearInterval(creditTimer);
+        clearTimeout(creditUpdate);
         runtime.metrics.onCredits = undefined;
         creditsUI?.setStatus?.('kiro-credits', undefined);
         creditsUI?.setWidget?.('kiro-usage', undefined);
@@ -211,7 +219,7 @@ export async function installExtension(pi: PiPort, ai: PiAiPort, tui?: UsageUiPo
         } });
     pi.registerCommand('usage', { description: 'Kiro credit dashboard: /usage [YYYY-MM | YYYY-MM-DD | refresh]', handler: async (args, ctx) => {
         bind(ctx);
-        try { await openUsageDashboard(args, ctx, runtime.credits, force => runtime.refreshAccountUsage(force), tui); }
+        try { await openUsageDashboard(args, ctx, runtime.credits, force => runtime.refreshAccountUsage(force), tui, config.reporting.accountCacheMs); }
         catch (error) { ctx.ui?.notify(publicError(error), 'error'); }
     } });
     return runtime;

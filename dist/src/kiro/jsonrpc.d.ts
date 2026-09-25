@@ -22,7 +22,10 @@ export declare class Ndjson {
     private onFrame;
     private decoder;
     private buffer;
-    constructor(maxBytes: number, onFrame: (frame: RpcFrame) => void);
+    private length;
+    private firstLine;
+    constructor(maxBytes: number, onFrame: (frame: RpcFrame, bytes: number) => void);
+    private append;
     push(chunk: Uint8Array): void;
     end(): void;
 }
@@ -36,7 +39,7 @@ export declare class RpcProcess {
     private closed;
     private closeResult;
     private writeTail;
-    onNotification: (method: string, params: unknown) => void;
+    onNotification: (method: string, params: unknown, bytes?: number) => void;
     onRequest: (method: string, params: unknown) => Promise<unknown>;
     onFailure: (e: Error) => void;
     constructor(config: Config, cwd: string, environment?: NodeJS.ProcessEnv);
@@ -49,7 +52,6 @@ export declare class RpcProcess {
     private receive;
     private send;
     private fail;
-    private terminate;
     private closeTask?;
     close(graceMs?: number): Promise<void>;
     private doClose;

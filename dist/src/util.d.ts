@@ -5,6 +5,7 @@ export declare function str(v: unknown, fallback?: string): string;
 export declare function list(v: unknown): unknown[];
 export declare function uid(prefix?: string): string;
 export declare function canonical(v: unknown): string;
+export declare function hashEncoded(encoded: string): string;
 export declare function hash(v: unknown): string;
 export declare function deferred<T>(): {
     promise: Promise<T>;

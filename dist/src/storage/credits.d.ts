@@ -26,6 +26,7 @@ export interface SessionUsage extends UsageTotals {
 }
 export interface TaskUsage extends UsageTotals {
     id: string;
+    kind: 'task' | 'prompt';
     summary: string;
     outcome: string;
     startedAt: number;
@@ -38,12 +39,16 @@ export declare class CreditLedger {
     private scope;
     private budget;
     readonly timeZone: string;
+    private readonly retainTaskExcerpts;
     readonly logFile: string;
     private activeTask?;
+    private cache;
+    private cacheVersion;
+    private cached;
     private taskBySession;
     private ownedTasks;
     private readonly inheritedTask;
-    constructor(journal: Journal, scope: string, budget: Config['budget'], timeZone?: string);
+    constructor(journal: Journal, scope: string, budget: Config['budget'], timeZone?: string, retainTaskExcerpts?: boolean);
     private createTask;
     beginTask(details: TaskDetails): string;
     ensureTask(details: TaskDetails): string;
@@ -60,8 +65,9 @@ export declare class CreditLedger {
     currentRunCredits(): number | null;
     recordTokens(report: TokenReport): void;
     private tokenTotals;
-    taskTokens(taskId: string): TokenTotals;
-    sessionTokens(sessionId: string): TokenTotals;
+    taskTokens(taskId: string, day?: string): TokenTotals;
+    promptTokens(promptId: string, day?: string): TokenTotals;
+    sessionTokens(sessionId: string, day?: string): TokenTotals;
     tokenUsage(sessionId: string): {
         lastPrompt: {
             prompts: number;
@@ -74,6 +80,7 @@ export declare class CreditLedger {
         } | null;
         session: TokenTotals;
     };
+    private readTokenUsage;
     snapshot(now?: number): {
         scope: string;
         day: string;
@@ -90,6 +97,7 @@ export declare class CreditLedger {
         logFile: string;
         coverage: string;
     };
+    private readSnapshot;
     accountUsage(): AccountUsage | undefined;
     saveAccountUsage(usage: AccountUsage): void;
     private totals;
@@ -111,6 +119,8 @@ export declare class CreditLedger {
         account: AccountUsage | undefined;
         logFile: string;
     };
+    private readDashboard;
     sessionTasks(day: string, sessionId: string): TaskUsage[];
+    private readSessionTasks;
     assertAvailable(): void;
 }

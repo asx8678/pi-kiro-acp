@@ -44,7 +44,7 @@ export function monthDays(month) {
     return Array.from({ length: date.getUTCDate() }, (_, index) => `${month}-${String(index + 1).padStart(2, '0')}`);
 }
 /** Locate the beginning of a civil day; DST days need not be 24 hours long. */
-export function dayStart(day, timeZone) {
+function dayBoundary(day, timeZone) {
     if (!validDay(day))
         throw new BridgeError('CONFIG', 'Use a valid date: YYYY-MM-DD.');
     const noon = Date.parse(`${day}T12:00:00Z`);
@@ -56,9 +56,28 @@ export function dayStart(day, timeZone) {
         else
             high = mid;
     }
-    if (localDay(low, timeZone) !== day)
-        throw new BridgeError('CONFIG', `Date ${day} does not exist in ${timeZone}.`);
     return low;
+}
+export function dayStart(day, timeZone) {
+    const start = dayBoundary(day, timeZone);
+    if (localDay(start, timeZone) !== day)
+        throw new BridgeError('CONFIG', `Date ${day} does not exist in ${timeZone}.`);
+    return start;
+}
+const monthRanges = new Map();
+/** Indexed UTC bounds, including zero-width civil days skipped by timezone changes. */
+export function monthDayRanges(month, timeZone) {
+    const key = `${timeZone}:${month}`;
+    let result = monthRanges.get(key);
+    if (!result) {
+        const days = monthDays(month);
+        const boundaries = [...days, `${shiftMonth(month, 1)}-01`].map(day => dayBoundary(day, timeZone));
+        result = days.map((day, i) => ({ day, start: boundaries[i], end: boundaries[i + 1] }));
+        if (monthRanges.size >= 12)
+            monthRanges.clear();
+        monthRanges.set(key, result);
+    }
+    return result.map(range => ({ ...range }));
 }
 const ranges = new Map();
 export function dayRange(day, timeZone) {
@@ -70,7 +89,7 @@ export function dayRange(day, timeZone) {
     if (!validDay(day))
         throw new BridgeError('CONFIG', 'Use a valid date: YYYY-MM-DD.');
     date.setUTCDate(date.getUTCDate() + 1);
-    const value = [dayStart(day, timeZone), dayStart(date.toISOString().slice(0, 10), timeZone)];
+    const value = [dayStart(day, timeZone), dayBoundary(date.toISOString().slice(0, 10), timeZone)];
     if (ranges.size >= 100)
         ranges.clear();
     ranges.set(key, value);

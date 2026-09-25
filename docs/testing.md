@@ -79,6 +79,50 @@ Catalog refresh tests verify that startup and repeated picker requests share a
 single discovery, picker cancellation does not cancel the shared load, rejected
 publications reuse the loaded result, and explicit commands can refresh or retry.
 
+### Dashboard navigation and accuracy regressions
+
+`tests/usage-dashboard.test.ts` covers settled fallback outcomes, explicit failure
+outcomes, legacy prompt drill-down and ID collisions, selected-day token scope,
+privacy-safe stable labels, configurable freshness in compact layouts, identity
+preservation during refresh/back navigation, search/clear/date/credit sorting,
+complete scrollable token fields and coverage, narrow/short terminals, correction
+refreshes, removed selections, safe read failures, disposal, and viewport-bounded
+SQL-free rendering. These use temporary synthetic ledgers, not account inference.
+A separate installed-Pi TUI probe passed 180 layout combinations using native
+Input, keyboard, Unicode-width and ANSI helpers, including bracketed-paste search,
+drill-down, token scrolling, back navigation and compact stale-balance display.
+
+### Follow-up reliability and performance regressions
+
+The follow-up offline pass has 154 passing tests, plus the installed-Pi fixture
+check. New regressions cover stalled/rejecting observers, final accounting during
+shutdown, delayed/missing catalogs and selection acknowledgments, abort/close
+during readiness, host/ACP queue overflow, active consumers, widget coalescing,
+SQL-free rendering, cross-connection corrections, rollback-safe caches, indexed
+session queries, skipped civil days, and canonical transcript hash reuse.
+No billed inference was used for this follow-up.
+
+Further regressions in `tests/deep-fixes.test.ts` cover real cross-process
+conversation contention and owner crashes, fenced reservation release, startup
+cancellation/idle eviction, journal cleanup after logging failure, reasoning-effort
+drift (including renamed/missing options), and linear fragmented-frame parsing
+with strict UTF-8, CRLF boundaries and bounded retained buffers.
+
+`tests/lifecycle-limits.test.ts` also covers immediate and delayed rejection from
+a payload hook that aborts synchronously. Accounting overflow regressions exercise
+both event-count and byte limits, preserving received credit/token reports and
+coalescing shutdown corrections after older queued totals. They verify that the
+resulting ledger still enforces the configured budget cutoff.
+
+`tests/reliability-faults.test.ts` covers SQLite-lock fault injection during abort,
+shutdown and policy failure (including multiple bindings and held effects), a
+whole-turn deadline across observer stalls and multiple Pi tool handoffs, late
+results without effect replay, inspection descendants after cancellation/timeout/
+parent-first exit/output overflow, spawn failure and startup cancellation, and
+transactional recovery interleavings that preserve recorded results. It also checks
+journal closure when both initialization and durable cleanup fail. These checks use
+only local fixtures and synthetic accounting; process-group assertions are POSIX-only.
+
 ### Local verification, 2026-09-24
 
 Verified with Pi 0.87.1, Kiro CLI 2.24.0, Node 24.21.0 and Bun 1.4.2:
@@ -142,6 +186,42 @@ Use the commands above to reproduce the build and test suite. Tested versions,
 results and verification scope are recorded on this page. Node's SQLite
 experimental warnings are expected on the tested Node version. The source build has no runtime package
 requirements other than Node core and the actual Pi host package when installed.
+
+## Live qualification, 2026-09-25
+
+See [the recorded live qualification results](live-qualification-2026-09-25.md).
+The initial run passed cancellation, approvals up to two minutes, manual compaction,
+model switching, fork isolation and resume, then stopped on Fovea freshness and
+Fabric compatibility gates. The [follow-up blocker ledger](blocker-fixes.md) records
+the fixes, successful five-minute approval, real plain-text workers at capacities
+one and three, and crash-after-effect recovery. The original 24-prompt cap is now
+exhausted. Normal-profile activation and the listed broader qualification gates
+remain pending.
+
+## Compatibility patch regressions
+
+`tests/compatibility-patches.test.ts` verifies provider/worker denials, merged
+profile limits, exact readiness metadata, patch prevalidation/idempotence and
+configuration pins without needing installed Fabric or Fovea.
+
+With Pi, Fabric **0.96.3**, Fovea **0.31.1**, Git and ast-grep installed:
+
+```sh
+npm run build
+npm run test:compat
+```
+
+This copies the packages to a disposable profile. It reproduces the original
+Fovea bug, applies and verifies both patches, tests real Fabric dispatch before
+credentials/network, checks native approval context normalization with an inert
+provider, and tests non-Git/Git refreshes, concurrent hints, additions/deletions
+and exact-snapshot reuse. Finally installed Pi executes actual `fabric_exec`
+with custom and native edits plus same-invocation Fovea calls through fake ACP.
+It sends **no paid prompts** and changes no normal-profile packages/settings.
+An optional positional path selects the source `npm/node_modules` directory;
+`--keep` retains the disposable profile for inspection instead of deleting it.
+These are offline compatibility checks, not evidence of vendor timeouts or billing.
+See [the current blocker ledger](blocker-fixes.md) for subsequent live results.
 
 ## Required live qualification
 

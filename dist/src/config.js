@@ -18,7 +18,7 @@ export function defaults() {
         policy: { kiroOnly: true },
         budget: { dailyCredits: 0, warningCredits: 50, warningFraction: 0.8 },
         efficiency: { enabled: true, contextTokens: 48000 },
-        reporting: { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', accountCacheMs: 300000 },
+        reporting: { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', accountCacheMs: 300000, retainTaskExcerpts: false },
         stateDir: path.join(agentDir(), 'kiro-acp'),
     };
 }
@@ -69,7 +69,7 @@ export function parseConfig(raw) {
             if (typeof template[k] === 'number' && (!Number.isSafeInteger(v) || Number(v) <= 0 || Number(v) > 2147483647))
                 throw new BridgeError('CONFIG', `${section}.${k} must be a positive bounded integer.`);
     }
-    for (const section of ['compatibility', 'sessions', 'policy', 'efficiency']) {
+    for (const section of ['compatibility', 'sessions', 'policy', 'efficiency', 'reporting']) {
         const v = c[section], base = d[section];
         for (const [k, x] of Object.entries(v))
             if (typeof base[k] === 'boolean' && typeof x !== 'boolean')

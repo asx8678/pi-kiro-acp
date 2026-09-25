@@ -44,6 +44,7 @@ export class V3Session {
     currentModel = '';
     currentMode = '';
     pinnedModel;
+    pinnedEffort;
     toolSurface;
     epochTools = false;
     failure;
@@ -52,6 +53,14 @@ export class V3Session {
     creditPromptId;
     promptDrained;
     disposed = false;
+    inspection;
+    drainFailure;
+    stopping = new AbortController();
+    configChanged = deferred();
+    queuedEvents = 0;
+    queuedBytes = 0;
+    backlogExceeded = false;
+    overflowAccounting = new Map();
     eventsTail = Promise.resolve();
     early = [];
     failed = deferred();
@@ -63,21 +72,53 @@ export class V3Session {
         this.observer = observer;
         this.toolSurface = new ToolSurfaceAudit(catalog);
         this.rpc = new RpcProcess(config, cwd);
-        this.rpc.onNotification = (method, params) => {
-            // Process metadata synchronously. Model text is sequenced with prompt completion.
+        this.rpc.onNotification = (method, params, frameBytes) => {
+            // Metadata is synchronous; normalized events capture their prompt identity
+            // before queuing. Neither a slow observer nor Pi may grow this queue forever.
             try {
                 this.metadata(method, params);
+                const events = this.normalizedEvents(method, params);
+                if (!events.length)
+                    return;
+                const bytes = frameBytes ?? Buffer.byteLength(JSON.stringify({ method, params }));
+                if (this.backlogExceeded || this.queuedEvents + events.length > config.limits.maxQueuedEvents || this.queuedBytes + bytes > config.limits.maxFrameBytes) {
+                    this.backlogExceeded = true;
+                    // Failure prevents another prompt. Retain at most its latest two
+                    // absolute accounting reports, including corrections during close.
+                    for (const event of events)
+                        if (event.kind === 'credits' || event.kind === 'tokens')
+                            this.overflowAccounting.set(event.kind, event);
+                    throw new BridgeError('LIMIT', 'ACP event backlog exceeded its configured count or byte bound.');
+                }
+                this.queuedEvents += events.length;
+                this.queuedBytes += bytes;
+                this.eventsTail = this.eventsTail.then(async () => {
+                    for (const event of events) {
+                        if (this.observer && !this.stopping.signal.aborted) {
+                            try {
+                                const observation = Promise.resolve().then(() => {
+                                    if (!this.stopping.signal.aborted)
+                                        return this.observer(event);
+                                });
+                                await withAbort(observation, this.stopping.signal);
+                            }
+                            catch (error) {
+                                if (!this.stopping.signal.aborted)
+                                    this.fail(asError(error));
+                            }
+                        }
+                        // Drain final accounting, but never dispatch stale text after close.
+                        if (!this.stopping.signal.aborted || event.kind === 'credits' || event.kind === 'tokens')
+                            await this.onEvent(event);
+                    }
+                }).catch(e => this.eventFailure(e)).finally(() => {
+                    this.queuedEvents -= events.length;
+                    this.queuedBytes -= bytes;
+                });
             }
             catch (e) {
                 this.fail(asError(e));
-                return;
             }
-            this.eventsTail = this.eventsTail.then(async () => {
-                for (const sanitized of this.normalizedEvents(method, params)) {
-                    await this.observer?.(sanitized);
-                    await this.onEvent(sanitized);
-                }
-            }).catch(e => this.fail(asError(e)));
         };
         this.rpc.onFailure = e => this.fail(e);
         this.rpc.onRequest = async (method, _params) => {
@@ -95,12 +136,24 @@ export class V3Session {
             throw new RpcRemoteError(-32601, `Unsupported client method: ${method}. CLI-owned auth is required.`);
         };
     }
+    eventFailure(error) {
+        const failure = asError(error);
+        if (this.stopping.signal.aborted)
+            this.drainFailure ??= failure;
+        this.fail(failure);
+    }
     fail(e) {
         if (this.failure || this.disposed)
             return;
         this.failure = e;
         this.failed.resolve(e);
-        this.onFailure(e);
+        this.stopping.abort();
+        try {
+            this.onFailure(e);
+        }
+        finally {
+            void this.close().catch(() => { });
+        } // Explicit close callers still receive drain failures.
     }
     check() {
         if (this.failure)
@@ -109,8 +162,10 @@ export class V3Session {
             throw new BridgeError('TRANSPORT', 'Kiro session is closed.');
     }
     async start(system, descriptor, signal) {
+        signal = signal ? AbortSignal.any([signal, this.stopping.signal]) : this.stopping.signal;
         throwIfAborted(signal);
-        const inspected = await inspectCli(this.config, signal);
+        this.inspection = inspectCli(this.config, signal);
+        const inspected = await this.inspection;
         this.version = inspected.version;
         throwIfAborted(signal);
         this.check();
@@ -144,7 +199,36 @@ export class V3Session {
         this.applyConfig(switched);
         this.currentMode = mode;
         this.epochTools = true;
+        await this.waitForConfig(() => this.modelEntries.length > 0 && this.options.some(o => o.category === 'model' || o.id === 'model'), signal, 'a live model catalog');
         this.check();
+    }
+    async waitForConfig(ready, signal, description) {
+        const timeout = AbortSignal.timeout(this.config.cli.rpcTimeoutMs);
+        const cancel = AbortSignal.any([this.stopping.signal, timeout, ...(signal ? [signal] : [])]);
+        while (true) {
+            this.check();
+            throwIfAborted(signal);
+            const changed = this.configChanged.promise;
+            if (ready())
+                return;
+            try {
+                await withAbort(changed, cancel);
+            }
+            catch (error) {
+                this.check();
+                throwIfAborted(signal);
+                if (timeout.aborted)
+                    throw new BridgeError('TIMEOUT', `Timed out waiting for ${description} from Kiro.`);
+                throw error;
+            }
+        }
+    }
+    assertPinnedSelection() {
+        if (this.pinnedModel && this.currentModel !== this.pinnedModel)
+            throw new BridgeError('POLICY', 'Kiro changed the selected model; implicit fallback is refused.');
+        const effort = this.pinnedEffort;
+        if (effort && this.options.find(o => o.id === effort.id)?.currentValue !== effort.value)
+            throw new BridgeError('POLICY', 'Kiro changed the selected reasoning effort; implicit fallback is refused.');
     }
     applyConfig(raw) {
         const options = parseOptions(raw);
@@ -156,10 +240,12 @@ export class V3Session {
         const model = this.options.find(o => o.category === 'model' || o.id === 'model');
         if (model)
             this.currentModel = model.currentValue;
-        if (this.promptActive && this.pinnedModel && this.currentModel !== this.pinnedModel)
-            throw new BridgeError('POLICY', 'Kiro changed the selected model during inference; implicit fallback is refused.');
+        if (this.promptActive)
+            this.assertPinnedSelection();
         if (object(raw) && object(raw.modes) && typeof raw.modes.currentModeId === 'string')
             this.currentMode = raw.modes.currentModeId;
+        this.configChanged.resolve();
+        this.configChanged = deferred();
     }
     metadata(method, params) {
         if (!object(params))
@@ -245,42 +331,54 @@ export class V3Session {
     }
     async select(modelId, effort, signal) {
         this.check();
+        if (this.promptActive)
+            throw new BridgeError('BUSY', 'Cannot change model selection while a Kiro prompt is in flight.');
         const model = this.options.find(o => o.category === 'model' || o.id === 'model');
         if (!model || !this.modelEntries.some(m => m.id === modelId))
             throw new BridgeError('MODEL_UNAVAILABLE', `Kiro did not advertise model ${modelId}; no implicit fallback is allowed.`);
         if (this.currentModel !== modelId) {
             const result = await this.rpc.request('session/set_config_option', { sessionId: this.sessionId, configId: model.id, value: modelId }, { signal });
             this.applyConfig(result);
-            if (this.currentModel !== modelId)
-                throw new BridgeError('COMPATIBILITY', 'Kiro model selection could not be verified from returned configuration.');
+            await this.waitForConfig(() => this.currentModel === modelId, signal, 'confirmation of the selected model');
         }
+        let pinnedEffort;
         if (effort !== undefined) {
             const option = this.options.find(o => o.id === 'effortLevel' || o.category === 'thought_level');
             if (!option || !option.values.some(v => v.value === effort))
                 throw new BridgeError('UNSUPPORTED', `Kiro does not advertise requested effort ${effort}.`);
+            pinnedEffort = { id: option.id, value: effort };
             if (option.currentValue !== effort) {
                 const result = await this.rpc.request('session/set_config_option', { sessionId: this.sessionId, configId: option.id, value: effort }, { signal });
                 this.applyConfig(result);
-                if (this.options.find(o => o.id === option.id)?.currentValue !== effort)
-                    throw new BridgeError('COMPATIBILITY', 'Kiro effort selection was not confirmed.');
+                await this.waitForConfig(() => this.options.find(o => o.id === option.id)?.currentValue === effort, signal, 'confirmation of the selected effort');
             }
         }
         this.pinnedModel = modelId;
+        this.pinnedEffort = pinnedEffort;
         this.check();
+        this.assertPinnedSelection();
     }
     catalogEntries() { return structuredClone(this.modelEntries); }
     effortValues() { return this.options.find(o => o.id === 'effortLevel' || o.category === 'thought_level')?.values.map(v => v.value) ?? []; }
-    selected() { return { model: this.currentModel, effort: this.options.find(o => o.id === 'effortLevel')?.currentValue, mode: this.currentMode }; }
+    selected() { return { model: this.currentModel, effort: this.options.find(o => o.id === 'effortLevel' || o.category === 'thought_level')?.currentValue, mode: this.currentMode }; }
     async prompt(input) {
         this.check();
         if (this.promptActive)
             throw new BridgeError('BUSY', 'A Kiro prompt is already in flight.');
+        // Idle config updates are allowed for explicit select(), not as implicit fallback.
+        this.assertPinnedSelection();
         this.promptCredits.reset();
         this.creditPromptId = uid('prompt_');
         this.promptDrained = deferred();
         this.promptActive = true;
+        // One deadline for the entire ACP turn, including observer drainage and
+        // all Pi handoffs. The RPC response alone must not disarm this timer.
+        const deadline = setTimeout(() => this.fail(new BridgeError('TIMEOUT', 'Kiro prompt lifecycle exceeded its configured deadline.')), this.config.cli.promptTimeoutMs);
         try {
-            await this.onEvent({ kind: 'prompt_start', promptId: this.creditPromptId, startedAt: Date.now() });
+            await withAbort(Promise.resolve().then(() => this.onEvent({ kind: 'prompt_start', promptId: this.creditPromptId, startedAt: Date.now() })), this.stopping.signal);
+            // An asynchronous observer/accounting hook can yield to another config update.
+            this.check();
+            this.assertPinnedSelection();
             const result = await this.rpc.request('session/prompt', { sessionId: this.sessionId, prompt: [{ type: 'text', text: input }] }, { timeoutMs: this.config.cli.promptTimeoutMs });
             await this.eventsTail;
             this.check();
@@ -288,12 +386,22 @@ export class V3Session {
                 throw new BridgeError('PROTOCOL', 'Missing ACP stop reason.');
             return result.stopReason;
         }
+        catch (error) {
+            // A policy/metadata failure closes RPC and rejects its pending request with
+            // cancellation. Report the original reason, not that teardown side effect.
+            throw this.failure ?? error;
+        }
         finally {
             try {
                 await this.eventsTail;
                 await this.onEvent({ kind: 'prompt_end', promptId: this.creditPromptId });
             }
+            catch (error) {
+                this.drainFailure ??= asError(error);
+                throw this.failure ?? error;
+            }
             finally {
+                clearTimeout(deadline);
                 this.promptActive = false;
                 this.promptDrained.resolve();
             }
@@ -321,6 +429,7 @@ export class V3Session {
         if (this.disposed)
             return;
         this.disposed = true;
+        this.stopping.abort();
         const deadline = performance.now() + this.config.cli.cancelGraceMs;
         if (this.sessionId)
             try {
@@ -331,8 +440,18 @@ export class V3Session {
             catch { /* transport already closed */ }
         // Kill the owned process rather than deleting user Kiro session records.
         await this.rpc.close(Math.max(0, deadline - performance.now()));
+        await this.inspection?.catch(() => { });
+        // No more notifications can arrive. Older queued reports must drain first
+        // so they cannot overwrite the final totals retained when the queue filled.
+        if (this.overflowAccounting.size)
+            this.eventsTail = this.eventsTail.then(async () => {
+                for (const event of this.overflowAccounting.values())
+                    await this.onEvent(event);
+            }).catch(e => this.eventFailure(e)).finally(() => this.overflowAccounting.clear());
         await this.eventsTail;
         await this.promptDrained?.promise;
+        if (this.drainFailure)
+            throw this.drainFailure;
     }
     get toolAudit() { return this.toolSurface.status; }
 }

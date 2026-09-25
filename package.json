@@ -53,6 +53,8 @@
     "test:pi": "node scripts/verify-pi.mjs",
     "check": "npm run typecheck && npm run build && npm test",
     "patch:fabric": "node scripts/patch-fabric.mjs",
+    "patch:fovea": "node scripts/patch-fovea.mjs",
+    "test:compat": "node scripts/verify-compat.mjs",
     "configure:efficiency": "node scripts/configure-efficiency.mjs",
     "doctor": "node dist/src/cli.js doctor",
     "demo": "node dist/src/cli.js demo",

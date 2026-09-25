@@ -42,7 +42,8 @@ export function canonical(v) {
     }
     return JSON.stringify(visit(v));
 }
-export function hash(v) { return createHash('sha256').update(canonical(v)).digest('hex'); }
+export function hashEncoded(encoded) { return createHash('sha256').update(encoded).digest('hex'); }
+export function hash(v) { return hashEncoded(canonical(v)); }
 export function deferred() {
     let resolve;
     let reject;
@@ -61,7 +62,12 @@ export function sleep(ms, signal) {
     });
 }
 export function withAbort(p, signal) {
-    throwIfAborted(signal);
+    if (signal?.aborted) {
+        // The work already exists, even if its caller aborted before reaching us.
+        // Observe both immediate and future rejection before throwing cancellation.
+        void p.catch(() => { });
+        throw cancelled();
+    }
     if (!signal)
         return p;
     return new Promise((resolve, reject) => {

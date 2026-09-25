@@ -57,6 +57,7 @@ export interface Config {
     reporting: {
         timeZone: string;
         accountCacheMs: number;
+        retainTaskExcerpts: boolean;
     };
     stateDir: string;
 }

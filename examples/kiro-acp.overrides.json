@@ -14,6 +14,9 @@
     "plannerId": null,
     "workerId": "auto"
   },
+  "reporting": {
+    "retainTaskExcerpts": false
+  },
   "admission": {
     "scope": "my-kiro-account",
     "maxActive": 3

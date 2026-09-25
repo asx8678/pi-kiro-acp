@@ -2,7 +2,7 @@ import path from 'node:path';
 import type { Config } from '../config.js';
 import { privateDir } from '../config.js';
 import type { Model, PiStream, EffectiveContext, GenerationOptions, Extractors, HostContext, ModelEntry } from '../types.js';
-import { BridgeError, cancelled, throwIfAborted, publicError } from '../errors.js';
+import { BridgeError, cancelled, throwIfAborted, publicError, asError } from '../errors.js';
 import { hash, object, uid, deferred, withAbort, type Obj } from '../util.js';
 import { snapshot, fallbackExtractors } from '../context/snapshot.js';
 import { Journal } from '../storage/journal.js';
@@ -10,7 +10,7 @@ import { CreditLedger } from '../storage/credits.js';
 import { Admission } from '../admission/leases.js';
 import { Binding } from '../sessions/coordinator.js';
 import { Metrics } from '../diagnostics/metrics.js';
-import { LocalStream, StreamWriter } from './stream.js';
+import { BoundedStream, LocalStream, StreamWriter } from './stream.js';
 import { Catalog } from '../tools/catalog.js';
 import { V3Session } from '../kiro/v3.js';
 import { saveCatalog, withContextWindow } from './models.js';
@@ -28,6 +28,7 @@ export class ProviderRuntime {
     private resetting = false;
     private fallbackSession = uid('host_');
     private closed = false;
+    private cleanupFailure?: unknown;
     private idleTimer: NodeJS.Timeout;
     private lifetime = new AbortController();
     private inFlight = new Set<Promise<void>>();
@@ -39,17 +40,22 @@ export class ProviderRuntime {
         ensureInstallationId(config);
         this.streamFactory = streamFactory ?? (() => new LocalStream(config.limits.maxQueuedEvents));
         this.journal = new Journal(config.stateDir);
-        this.journal.reconcileDeadOwners();
-        this.journal.prune();
-        this.credits = new CreditLedger(this.journal, config.admission.scope, config.budget, config.reporting.timeZone);
-        this.metrics = new Metrics(this.credits, this.config.reporting.accountCacheMs);
-        this.admission = new Admission(this.journal, config.admission, () => this.credits.assertAvailable());
-        this.idleTimer = setInterval(() => { void this.sweep(); }, Math.min(config.sessions.idleTtlMs, 60000));
-        this.idleTimer.unref();
+        try {
+            this.journal.reconcileDeadOwners();
+            this.journal.prune();
+            this.credits = new CreditLedger(this.journal, config.admission.scope, config.budget, config.reporting.timeZone, config.reporting.retainTaskExcerpts);
+            this.metrics = new Metrics(this.credits, this.config.reporting.accountCacheMs);
+            this.admission = new Admission(this.journal, config.admission, () => this.credits.assertAvailable());
+            this.idleTimer = setInterval(() => { void this.sweep().catch(error => { this.cleanupFailure ??= error; }); }, Math.min(config.sessions.idleTtlMs, 60000));
+            this.idleTimer.unref();
+        } catch (error) {
+            try { this.journal.close(); } catch { /* Preserve the startup failure. */ }
+            throw error;
+        }
     }
     setHost(ctx: HostContext): void { this.host = ctx; }
     generate(model: Model, context: EffectiveContext, options: GenerationOptions = {}): PiStream {
-        const stream = this.streamFactory();
+        const stream = new BoundedStream(this.streamFactory(), this.config.limits.maxQueuedEvents);
         const signal = options.signal ? AbortSignal.any([options.signal, this.lifetime.signal]) : this.lifetime.signal;
         const task = this.execute(model, context, { ...options, signal }, stream).catch(e => new StreamWriter(stream, model, this.config.limits.maxOutputBytes).fail(e));
         this.inFlight.add(task);
@@ -110,7 +116,9 @@ export class ProviderRuntime {
         const drain = deferred<void>();
         this.reservations.set(key, drain);
         let binding = this.bindings.get(key);
+        let releaseBinding: (() => void) | undefined;
         try {
+            releaseBinding = this.journal.reserveBinding(key);
             // Recover only from an actual result supplied by Pi. A dead process's HTTP callback is never restored.
             for (const row of this.journal.recoveryCandidates(key)) {
                 if (binding && row.generation === binding.generation)
@@ -155,12 +163,17 @@ export class ProviderRuntime {
             throw e;
         }
         finally {
-            if (auxiliary && binding) {
-                await this.evict(key, binding);
+            try {
+                if (auxiliary && binding)
+                    await this.evict(key, binding);
+            } finally {
+                try { releaseBinding?.(); }
+                finally {
+                    if (this.reservations.get(key) === drain)
+                        this.reservations.delete(key);
+                    drain.resolve();
+                }
             }
-            if (this.reservations.get(key) === drain)
-                this.reservations.delete(key);
-            drain.resolve();
         }
     }
     async discover(signal?: AbortSignal): Promise<{
@@ -257,15 +270,17 @@ export class ProviderRuntime {
         }
     }
     private async evict(key: string, binding: Binding): Promise<void> {
-        await binding.close();
-        if (this.bindings.get(key) === binding)
-            this.bindings.delete(key);
+        try { await binding.close(); }
+        finally {
+            if (this.bindings.get(key) === binding) this.bindings.delete(key);
+        }
     }
     async abortActive(): Promise<void> {
-        for (const [key, b] of [...this.bindings])
-            if (b.hasPending || b.isBusy) {
-                await this.evict(key, b);
-            }
+        const results = await Promise.allSettled([...this.bindings]
+            .filter(([, binding]) => binding.hasPending || binding.isBusy)
+            .map(([key, binding]) => this.evict(key, binding)));
+        const errors = results.flatMap(result => result.status === 'rejected' ? [result.reason] : []);
+        if (errors.length) throw new AggregateError(errors, errors.map(publicError).join('; '));
     }
     async invalidate(): Promise<void> {
         // Preserve outstanding handoffs until their next authoritative result; fingerprinting
@@ -283,7 +298,7 @@ export class ProviderRuntime {
                 await this.evict(key, b);
             }
     }
-    status(): Obj { return { experimental: true, qualifiedVersions: this.config.compatibility.approvedVersions, sessions: [...this.bindings.values()].map(b => b.status()), admission: this.admission.status(), unresolved: this.journal.unresolved(), usage: this.metrics.snapshot() }; }
+    status(): Obj { return { cleanupError: this.cleanupFailure ? publicError(this.cleanupFailure) : undefined, experimental: true, qualifiedVersions: this.config.compatibility.approvedVersions, sessions: [...this.bindings.values()].map(b => b.status()), admission: this.admission.status(), unresolved: this.journal.unresolved(), usage: this.metrics.snapshot() }; }
     private closeTask?: Promise<void>;
     close(): Promise<void> { return this.closeTask ??= this.doClose(); }
     private async doClose(): Promise<void> {
@@ -292,15 +307,19 @@ export class ProviderRuntime {
         this.closed = true;
         this.lifetime.abort();
         clearInterval(this.idleTimer);
-        await Promise.allSettled([...this.bindings.values()].map(b => b.close()));
+        const errors: unknown[] = this.cleanupFailure ? [this.cleanupFailure] : [];
+        const collect = (results: PromiseSettledResult<unknown>[]) => {
+            for (const result of results) if (result.status === 'rejected') errors.push(result.reason);
+        };
+        collect(await Promise.allSettled([...this.bindings.values()].map(b => b.close())));
         this.bindings.clear();
-        await Promise.allSettled([...this.discoveries].map(s => s.close()));
+        collect(await Promise.allSettled([...this.discoveries].map(s => s.close())));
         this.discoveries.clear();
         await this.accountLoad?.catch(() => {});
         // Keep the journal open until starters and suspended generation owners have drained.
-        await Promise.allSettled([...this.inFlight]);
-        this.journal.abandonOwned();
-        this.credits.close();
-        this.journal.close();
+        collect(await Promise.allSettled([...this.inFlight]));
+        for (const finish of [() => this.journal.abandonOwned(), () => this.credits.close(), () => this.journal.close()])
+            try { finish(); } catch (error) { errors.push(error); }
+        if (errors.length) throw new AggregateError(errors, errors.map(error => asError(error).message).join('; '));
     }
 }

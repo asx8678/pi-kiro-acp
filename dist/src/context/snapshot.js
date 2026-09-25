@@ -1,5 +1,5 @@
 import { BridgeError } from '../errors.js';
-import { canonical, hash, list, object, str } from '../util.js';
+import { canonical, hash, hashEncoded, list, object, str } from '../util.js';
 /** Public SystemMessage semantics, also used in isolated tests. Live Pi uses its own helpers. */
 export const fallbackExtractors = {
     system(messages) {
@@ -95,8 +95,15 @@ export function snapshot(context, extractors = fallbackExtractors, noTools = fal
     const encoded = canonical({ system, tools, messages }), bytes = Buffer.byteLength(encoded);
     if (bytes > maxBytes)
         throw new BridgeError('LIMIT', 'Pi context exceeds the configured bridge byte ceiling; compact explicitly.');
-    return { system, systemHash: hash(system), tools, toolsHash: hash(tools), messages, hashes: messages.map(hash), bytes, hash: hash({ system, tools, messages }) };
+    return { system, systemHash: hash(system), tools, toolsHash: hash(tools), messages, hashes: messages.map(hash), bytes, hash: hashEncoded(encoded) };
 }
+export function hashPrefixLength(old, next) {
+    let i = 0;
+    while (i < old.length && i < next.length && old[i] === next[i])
+        i++;
+    return i;
+}
+/** Compatibility helper for callers without an immutable snapshot. */
 export function prefixLength(old, next) {
     let i = 0;
     while (i < old.length && i < next.length && hash(old[i]) === hash(next[i]))

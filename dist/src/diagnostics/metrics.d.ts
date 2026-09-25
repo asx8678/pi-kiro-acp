@@ -32,6 +32,21 @@ export declare class Metrics {
         scope: string;
         sources: string[];
     };
-    creditStatus(): string;
+    creditStatus(usage?: {
+        scope: string;
+        day: string;
+        timeZone: string;
+        reportedCredits: number | null;
+        allTimeReportedCredits: number | null;
+        prompts: number;
+        unreportedPrompts: number;
+        pendingPrompts: number;
+        dailyLimit: number | null;
+        warningCredits: number | null;
+        warning: boolean;
+        exhausted: boolean;
+        logFile: string;
+        coverage: string;
+    } | undefined): string;
     snapshot(): Obj;
 }

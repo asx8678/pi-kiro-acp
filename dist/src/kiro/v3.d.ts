@@ -55,6 +55,7 @@ export declare class V3Session {
     private currentModel;
     private currentMode;
     private pinnedModel?;
+    private pinnedEffort?;
     private toolSurface;
     private epochTools;
     private failure?;
@@ -63,6 +64,14 @@ export declare class V3Session {
     private creditPromptId?;
     private promptDrained?;
     private disposed;
+    private inspection?;
+    private drainFailure?;
+    private stopping;
+    private configChanged;
+    private queuedEvents;
+    private queuedBytes;
+    private backlogExceeded;
+    private overflowAccounting;
     private eventsTail;
     private early;
     readonly failed: {
@@ -73,9 +82,12 @@ export declare class V3Session {
     onEvent: (event: KiroEvent) => Promise<void>;
     onFailure: (e: Error) => void;
     constructor(config: Config, cwd: string, catalog: Catalog, observer?: ((e: unknown) => Promise<void>) | undefined);
+    private eventFailure;
     private fail;
     private check;
     start(system: string, descriptor: Obj | undefined, signal?: AbortSignal): Promise<void>;
+    private waitForConfig;
+    private assertPinnedSelection;
     private applyConfig;
     private metadata;
     private normalizedEvents;

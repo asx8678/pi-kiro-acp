@@ -78,9 +78,8 @@ export class Metrics {
     get credits(): { used: number | null; reports: number; scope: string; sources: string[] } {
         return { used: this.creditsUsed, reports: this.creditReports, scope: 'current extension run in this Pi process', sources: [...this.creditSources] };
     }
-    creditStatus(): string {
-        if (this.ledger) {
-            const usage = this.ledger.snapshot();
+    creditStatus(usage = this.ledger?.snapshot()): string {
+        if (this.ledger && usage) {
             const format = (n: number) => n > 0 && n < 0.01 ? '<0.01' : new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(n);
             const limit = usage.dailyLimit === null ? '' : ` / ${usage.dailyLimit}`;
             const used = usage.reportedCredits === null && usage.prompts > 0 ? 'awaiting credit report' : `${format(usage.reportedCredits ?? 0)}${limit} credits`;

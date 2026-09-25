@@ -13,6 +13,19 @@ export declare class LocalStream implements PiStream {
     [Symbol.asyncIterator](): AsyncIterator<PiEvent>;
     result(): Promise<Assistant>;
 }
+/** Bound delivery even when the backing queue belongs to the installed Pi host.
+ * One extra terminal event is always allowed so overflow remains observable. */
+export declare class BoundedStream implements PiStream {
+    private target;
+    private limit;
+    private queued;
+    private ended;
+    constructor(target: PiStream, limit: number);
+    push(event: PiEvent): void;
+    end(result?: Assistant): void;
+    result(): Promise<Assistant>;
+    [Symbol.asyncIterator](): AsyncIterator<PiEvent>;
+}
 export declare class StreamWriter {
     readonly stream: PiStream;
     private maxBytes;

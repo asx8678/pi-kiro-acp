@@ -43,7 +43,8 @@ export function canonical(v: unknown): string {
     }
     return JSON.stringify(visit(v));
 }
-export function hash(v: unknown): string { return createHash('sha256').update(canonical(v)).digest('hex'); }
+export function hashEncoded(encoded: string): string { return createHash('sha256').update(encoded).digest('hex'); }
+export function hash(v: unknown): string { return hashEncoded(canonical(v)); }
 export function deferred<T>() {
     let resolve!: (v: T | PromiseLike<T>) => void;
     let reject!: (e: unknown) => void;
@@ -62,7 +63,12 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     });
 }
 export function withAbort<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
-    throwIfAborted(signal);
+    if (signal?.aborted) {
+        // The work already exists, even if its caller aborted before reaching us.
+        // Observe both immediate and future rejection before throwing cancellation.
+        void p.catch(() => { });
+        throw cancelled();
+    }
     if (!signal)
         return p;
     return new Promise<T>((resolve, reject) => {

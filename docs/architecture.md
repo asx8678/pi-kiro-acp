@@ -38,12 +38,24 @@ compatibility). Reset does not change recovery identity; each new Binding has a
 separate generation ID. Auxiliary requests receive unique bindings and close after
 completion. Continuation waiters recheck ownership after draining a completed
 stream, so a rejected competitor cannot close the winning request's binding.
+An atomic SQLite `binding_reservations` claim also fences each provider turn
+across processes, before recovery checks or startup. Claims do not expire while
+the owner is alive, and token-qualified releases cannot erase a successor's claim.
+The claim releases when the turn drains; at a tool boundary the durable handoff
+continues to exclude foreign live owners. This is separate from account admission
+and does not prevent unrelated conversations or auxiliary workers from running.
 
 A new Binding starts its internal loopback server, inspects the official CLI,
 negotiates v3, injects a minimal custom agent and activates it. It discovers model
 options, selects the exact requested model/effort, waits for the bridge catalog
 to be loaded, and verifies the effective tool inventory when required. No model
-prompt is sent until these steps pass.
+prompt is sent until these steps pass. Initial catalogs and model/effort
+confirmations may arrive in notifications after their RPC replies: readiness
+waits are cancellable and bounded by `cli.rpcTimeoutMs`, without inference retries.
+The exact model and any explicitly requested reasoning effort are pinned. They
+are checked before each prompt, again after asynchronous pre-send hooks, and on
+configuration updates during inference. Missing/changed effort options fail
+closed; an unspecified effort remains automatic.
 
 The Pi stream and ACP prompt have different lifetimes. One ACP prompt may yield
 several Pi streams at tool boundaries. A Pi `done(toolUse)` does not imply that
@@ -71,7 +83,9 @@ result, but never dispatch the effect again.
 
 System instructions and tool declarations are extracted using current Pi helpers.
 The projection fingerprints content rather than message counts or timestamps.
-It preserves user/assistant/tool-result roles in deterministic replay text and
+Snapshots compute each message digest once; append checks reuse those immutable
+digests instead of serializing the transcript again. It preserves
+user/assistant/tool-result roles in deterministic replay text and
 rejects unsupported image blocks. Reasoning content is not silently conflated
 with an ordinary user instruction.
 
@@ -117,14 +131,46 @@ before the result is released. Dead/closed owners can be reclaimed; a merely old
 timestamp is not proof that a living process stopped.
 
 Resident session limits are per runtime in this release. Idle non-pending sessions
-are swept; a pending effect is never discarded as ordinary idle cache.
+are swept; a pending effect is never discarded as ordinary idle cache. STARTING
+bindings are active: cancellation closes them, while idle sweep and invalidation
+leave their bounded startup in progress.
 
 Shutdown closes the lifetime cancellation signal first, then drains bindings and
 startup operations before closing the journal. HTTP-listener startup and close
 are serialized. The package includes regression tests for startup-close races,
 async payload cancellation and discovery cancellation. Sending `session/cancel`
 has a short deadline within `cancelGraceMs`; blocked stdin cannot postpone process
-termination indefinitely.
+termination indefinitely. Observer waits are aborted on close or failure; late
+settlements cannot dispatch stale text. A single `promptTimeoutMs` deadline covers
+inference, all Pi handoffs, and observer drainage, even after the RPC reply has
+arrived; a stalled observer cannot retain an admission slot indefinitely.
+Already-queued credit/token reports drain
+before the journal closes. If a notification exceeds the backlog limit, the
+session closes and retains at most two final accounting reports: the latest
+absolute credit total and token counts. These drain after older queued reports,
+preserving billing and budget enforcement without allowing an unbounded queue.
+Payload promises remain observed even when their hook aborts synchronously, so
+immediate or delayed rejection cannot become an unhandled host error.
+Reporting errors still propagate, but every cleanup stage is attempted. Binding
+cleanup terminates the owned process before fallible lease/journal writes, then
+settles held requests and stream waiters even if SQLite is locked. Runtime shutdown
+attempts all bindings and closes the journal connection even when durable cleanup
+or writing `usage.jsonl` fails. A failed durable write is reported, not treated as
+successful release: persisted ownership/effect records remain conservative until
+safe recovery. Background eviction failures are retained in status `cleanupError`.
+Recovery re-reads each handoff's phase and owner under the same write transaction;
+a concurrent real result or completed reconciliation is never overwritten.
+
+On macOS/Linux both ACP and CLI inspection (`--version`/`--help`) own a process
+group. Cleanup escalates for surviving descendants even if the leader exits first.
+Windows currently terminates the immediate child only; descendant cleanup remains
+a separate qualification/implementation requirement. Both the native Pi delivery queue and normalized ACP
+notification chain enforce `limits.maxQueuedEvents`; the latter also bounds bytes
+by `limits.maxFrameBytes`. A terminal Pi error is permitted beyond the queue limit
+so overflow remains visible rather than silently dropping stream events.
+NDJSON framing scans only incoming bytes and uses a geometrically grown bounded
+buffer rather than rescanning the accumulated frame. UTF-8 remains strict, split
+CRLF delimiters are supported, and large buffers are released at frame boundaries.
 
 ## Module map
 
@@ -135,6 +181,7 @@ termination indefinitely.
 | `src/provider/stream.ts` | Balanced Pi events and unknown accounting placeholders |
 | `src/provider/models.ts` | Live/catalog-to-Pi model projection |
 | `src/kiro/jsonrpc.ts` | Strict framing, requests, subprocess and CLI inspection |
+| `src/kiro/process.ts` | Shared owned-process/group termination and escalation |
 | `src/kiro/v3.ts` | v3 agent, mode/config, inventory and event normalization |
 | `src/context/snapshot.ts` | Effective context, fingerprints and replay |
 | `src/tools/catalog.ts` | Exact schemas and aliases |

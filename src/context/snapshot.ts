@@ -1,6 +1,6 @@
 import type { EffectiveContext, Extractors, Tool } from '../types.js';
 import { BridgeError } from '../errors.js';
-import { canonical, hash, list, object, str, type Obj } from '../util.js';
+import { canonical, hash, hashEncoded, list, object, str, type Obj } from '../util.js';
 export interface Snapshot {
     system: string;
     systemHash: string;
@@ -106,12 +106,17 @@ export function snapshot(context: EffectiveContext, extractors: Extractors = fal
     const encoded = canonical({ system, tools, messages }), bytes = Buffer.byteLength(encoded);
     if (bytes > maxBytes)
         throw new BridgeError('LIMIT', 'Pi context exceeds the configured bridge byte ceiling; compact explicitly.');
-    return { system, systemHash: hash(system), tools, toolsHash: hash(tools), messages, hashes: messages.map(hash), bytes, hash: hash({ system, tools, messages }) };
+    return { system, systemHash: hash(system), tools, toolsHash: hash(tools), messages, hashes: messages.map(hash), bytes, hash: hashEncoded(encoded) };
 }
+export function hashPrefixLength(old: readonly string[], next: readonly string[]): number {
+    let i = 0;
+    while (i < old.length && i < next.length && old[i] === next[i]) i++;
+    return i;
+}
+/** Compatibility helper for callers without an immutable snapshot. */
 export function prefixLength(old: Obj[], next: Obj[]): number {
     let i = 0;
-    while (i < old.length && i < next.length && hash(old[i]) === hash(next[i]))
-        i++;
+    while (i < old.length && i < next.length && hash(old[i]) === hash(next[i])) i++;
     return i;
 }
 export function replay(messages: Obj[]): string {

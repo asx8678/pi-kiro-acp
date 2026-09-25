@@ -44,6 +44,42 @@ test('extension registers a native Pi provider and current lifecycle hooks', asy
             process.env.PI_KIRO_ACP_CONFIG = old;
     }
 });
+test('widget updates coalesce and pending refreshes are cancelled on shutdown', async () => {
+    const c = config(), file = c.stateDir + '/config.json', old = process.env.PI_KIRO_ACP_CONFIG;
+    writePrivateJson(file, c);
+    process.env.PI_KIRO_ACP_CONFIG = file;
+    const handlers = new Map();
+    const pi = { registerProvider() { }, registerCommand() { }, on: (event, handler) => { handlers.set(event, handler); } };
+    const r = await installExtension(pi, { createAssistantMessageEventStream: () => new LocalStream(), getCurrentSystemPrompt: fallbackExtractors.system, getCurrentTools: fallbackExtractors.tools });
+    let reads = 0, updates = 0;
+    const snapshot = r.credits.snapshot.bind(r.credits);
+    r.credits.snapshot = now => { reads++; return snapshot(now); };
+    const host = { cwd: c.stateDir, model: { provider: 'kiro-acp', id: 'auto' }, ui: { notify() { }, setStatus: (_key, text) => { if (text)
+                updates++; } } };
+    try {
+        for (let i = 0; i < 20; i++) {
+            handlers.get('before_provider_request')({}, host);
+            r.metrics.onCredits?.();
+        }
+        assert.equal(reads, 0);
+        await new Promise(resolve => setTimeout(resolve, 100));
+        assert.equal(reads, 1);
+        assert.equal(updates, 1);
+        r.metrics.onCredits?.();
+        await handlers.get('session_shutdown')({}, host);
+        await new Promise(resolve => setTimeout(resolve, 100));
+        assert.equal(reads, 1);
+        assert.equal(updates, 1);
+    }
+    finally {
+        await handlers.get('session_shutdown')({}, host);
+        await cleanup(r, c);
+        if (old === undefined)
+            delete process.env.PI_KIRO_ACP_CONFIG;
+        else
+            process.env.PI_KIRO_ACP_CONFIG = old;
+    }
+});
 test('stream events are balanced and contain exactly one terminal event', async () => {
     const c = config(), s = new LocalStream(), w = new StreamWriter(s, model(c), 10000);
     w.chunk('thinking', 'Consider ');

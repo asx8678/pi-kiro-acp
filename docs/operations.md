@@ -16,7 +16,7 @@ versioned with `version: 1` and provider ID `kiro-acp`.
 | `cli.binary` | Official Kiro executable (trusted path or PATH name) |
 | `cli.prefixArgs` | Trusted launcher prefix; empty normally, fixture in tests |
 | `cli.rpcTimeoutMs` | Control/initialization timeout |
-| `cli.promptTimeoutMs` | Wall-clock bound on the entire ACP prompt including tool waits |
+| `cli.promptTimeoutMs` | Whole-ACP-turn deadline, including all tool waits and observer drainage |
 | `cli.cancelGraceMs` | Process termination grace, including bounded best-effort cancel delivery |
 | `compatibility.allowUnverified` | Explicit experimental version opt-in |
 | `compatibility.approvedVersions` | Full CLI version strings qualified by the operator |
@@ -30,10 +30,10 @@ versioned with `version: 1` and provider ID `kiro-acp`.
 | `sessions.maxResident` | Resident binding limit in one runtime |
 | `sessions.forceRebuild` | Debug/replay baseline instead of reuse |
 | `limits.maxPromptBytes` | Actual serialized effective-context byte ceiling |
-| `limits.maxFrameBytes` | Incoming/outgoing RPC and MCP frame bound |
+| `limits.maxFrameBytes` | Incoming/outgoing RPC and MCP frame bound; also caps queued ACP notification bytes |
 | `limits.maxOutputBytes` | Visible model text/thinking byte ceiling |
 | `limits.maxToolResultBytes` | Actual Pi result byte ceiling |
-| `limits.maxQueuedEvents` | Local CLI/test stream bound; Pi owns its actual stream |
+| `limits.maxQueuedEvents` | Queued nonterminal Pi events (including native host streams) and pending normalized ACP events; overflow fails closed |
 | `limits.maxHandoffMs` | Maximum held internal MCP wait |
 | `admission.scope` | Explicit local account/policy coordination label |
 | `admission.maxActive` | Shared local active-continuation capacity |
@@ -45,6 +45,7 @@ versioned with `version: 1` and provider ID `kiro-acp`.
 | `budget.warningFraction` | Warning fraction used only when warningCredits is 0 and a cutoff is enabled |
 | `reporting.timeZone` | IANA time zone for calendar days, months and dashboard times; defaults to the system zone, installed Europe/Paris |
 | `reporting.accountCacheMs` | Minimum interval between automatic account-usage reads; default 300,000 ms; explicit refresh bypasses it |
+| `reporting.retainTaskExcerpts` | Opt in to persistent task/response excerpts and supplied session names; default **false**. Does not scrub historical data; restart all bridge processes after changing it |
 | `efficiency.enabled` | Apply the reviewed Fabric routing/worker/output efficiency profile |
 | `efficiency.contextTokens` | Target used by configure:efficiency to build per-model Pi compaction settings |
 | `stateDir` | Private catalog/journal/workspace directory |
@@ -69,6 +70,17 @@ the displayed model window does not increase transport or prompt byte limits.
 larger whole-prompt budget; a tool consuming the entire prompt budget still
 leaves no time for inference. These local settings do not prove Kiro's own MCP
 client tolerates the same duration. Test long waits on your actual build.
+The deadline does not restart for each Pi handoff or end when the RPC reply arrives.
+After timeout, observer callbacks are detached safely, stale output is suppressed,
+and already-received accounting is drained before releasing the active slot.
+
+Cancellation/shutdown can report a cleanup error (for example `database is locked`)
+after terminating the CLI and settling request waiters. This is not a successful
+durable release: do not delete journal rows or retry an uncertain host effect.
+Resolve the storage problem, stop/restart affected Pi owners, then reconcile using
+the real Pi result. Background eviction errors appear as `cleanupError` in status.
+On macOS/Linux, inspection and ACP cleanup include the owned process group;
+Windows descendant termination is not yet qualified.
 
 ## State layout
 
@@ -126,7 +138,9 @@ block new dispatch, even if the current conversation has a different key. Supply
 exactly one matching real Pi result, or use the review-and-reconcile procedure
 above after closing its owner. Do not delete the database or mark uncertain
 effects as completed merely to clear this guard. The added marker table preserves
-old writers' handoff-table layout; completed history is retained.
+old writers' handoff-table layout; completed history is retained. The shared
+`binding_reservations` table is also additive, but older builds do not honor its
+cross-process guard: restart **all** Pi instances and workers when upgrading.
 
 ## Troubleshooting
 

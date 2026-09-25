@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { snapshot, fallbackExtractors, prefixLength, projectMessage } from '../src/context/snapshot.js';
+import { snapshot, fallbackExtractors, prefixLength, hashPrefixLength, projectMessage } from '../src/context/snapshot.js';
 import { canonical, hash } from '../src/util.js';
 import { defaults, parseConfig } from '../src/config.js';
 import { Catalog } from '../src/tools/catalog.js';
@@ -38,6 +38,17 @@ test('transcript fingerprints ignore bookkeeping but preserve actual content', (
 });
 test('prefix detection finds history rewrites of identical length', () => {
     assert.equal(prefixLength([{ role: 'user', content: 'a' }], [{ role: 'user', content: 'b' }]), 0);
+});
+test('precomputed prefix hashes preserve rewrite and append detection', () => {
+    const ctx = context('first'), a = snapshot(ctx);
+    ctx.messages.push({ role: 'assistant', content: [{ type: 'text', text: 'reply' }] });
+    const b = snapshot(ctx);
+    assert.equal(hashPrefixLength(a.hashes, b.hashes), a.messages.length);
+    ctx.messages[1] = { role: 'user', content: 'rewritten' };
+    const c = snapshot(ctx);
+    assert.equal(hashPrefixLength(b.hashes, c.hashes), 0);
+    assert.equal(a.hash, hash({ system: a.system, tools: a.tools, messages: a.messages }));
+    assert.deepEqual(a.hashes, a.messages.map(hash));
 });
 test('images are refused, not silently dropped', () => {
     const ctx = context();

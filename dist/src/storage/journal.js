@@ -13,6 +13,8 @@ export class Journal {
     db;
     instance = uid();
     closed = false;
+    transactionActive = false;
+    get inTransaction() { return this.transactionActive; }
     constructor(dir) {
         this.dir = dir;
         privateDir(dir);
@@ -38,6 +40,9 @@ export class Journal {
         id TEXT PRIMARY KEY,scope TEXT NOT NULL,owner_pid INTEGER NOT NULL,owner_instance TEXT NOT NULL,
         state TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS leases_scope ON leases(scope,state);
+      CREATE TABLE IF NOT EXISTS binding_reservations (
+        binding TEXT PRIMARY KEY,token TEXT NOT NULL,owner_pid INTEGER NOT NULL,owner_instance TEXT NOT NULL);
+
     `);
         this.db.prepare('INSERT INTO owners VALUES (?,?,?,?)').run(this.instance, process.pid, 'open', Date.now());
         const version = this.db.prepare('SELECT version FROM schema_version').get();
@@ -50,6 +55,7 @@ export class Journal {
         if (this.closed)
             throw new BridgeError('STORAGE', 'Journal is closed.');
         this.db.exec('BEGIN IMMEDIATE');
+        this.transactionActive = true;
         try {
             const result = fn();
             this.db.exec('COMMIT');
@@ -59,6 +65,28 @@ export class Journal {
             this.db.exec('ROLLBACK');
             throw e;
         }
+        finally {
+            this.transactionActive = false;
+        }
+    }
+    /** Fence a provider turn across processes before recovery or any asynchronous startup.
+     * No expiry: a slow live owner must never lose exclusivity. At a tool boundary the
+     * durable handoff protects the conversation after this short-lived claim releases.
+     */
+    reserveBinding(binding) {
+        const token = uid();
+        this.transaction(() => {
+            const owner = this.db.prepare('SELECT owner_pid,owner_instance FROM binding_reservations WHERE binding=?').get(binding);
+            if (owner && this.ownerLive(owner.owner_instance, owner.owner_pid))
+                throw new BridgeError('BUSY', 'Another live provider request owns this Pi conversation.');
+            this.db.prepare('INSERT OR REPLACE INTO binding_reservations VALUES (?,?,?,?)')
+                .run(binding, token, process.pid, this.instance);
+        });
+        return () => {
+            if (!this.closed)
+                this.db.prepare('DELETE FROM binding_reservations WHERE binding=? AND token=? AND owner_instance=?')
+                    .run(binding, token, this.instance);
+        };
     }
     receive(input) {
         return this.transaction(() => {
@@ -101,12 +129,24 @@ export class Journal {
             AND (h.binding=? OR NOT EXISTS (SELECT 1 FROM stable_handoffs s WHERE s.id=h.id))`)
             .all(binding);
     }
+    retireHandoff(id, owned) {
+        this.transaction(() => {
+            // The candidate list is only a hint: another connection may have
+            // recorded a real result since it was read. Never move that row back.
+            const row = this.get(id);
+            if (!row || (row.phase !== 'RECEIVED' && row.phase !== 'EXPOSED_TO_PI'))
+                return;
+            if (owned ? row.owner_instance !== this.instance :
+                row.owner_instance === this.instance || this.ownerLive(row.owner_instance, row.owner_pid))
+                return;
+            this.db.prepare('UPDATE handoffs SET phase=?,updated_at=? WHERE id=?')
+                .run(row.phase === 'RECEIVED' ? 'CANCELLED' : 'UNCERTAIN', Date.now(), id);
+        });
+    }
     reconcileDeadOwners() {
-        for (const row of this.unresolved()) {
-            if (row.owner_instance === this.instance || this.ownerLive(row.owner_instance, row.owner_pid))
-                continue;
-            this.transition(row.id, row.phase === 'RECEIVED' ? 'CANCELLED' : 'UNCERTAIN');
-        }
+        for (const row of this.unresolved())
+            if (row.phase !== 'UNCERTAIN' && row.owner_instance !== this.instance)
+                this.retireHandoff(row.id, false);
     }
     ownerLive(instance, pid) {
         const owner = this.db.prepare('SELECT state FROM owners WHERE instance=?').get(instance);
@@ -115,7 +155,7 @@ export class Journal {
     abandonOwned() {
         for (const row of this.unresolved())
             if (row.owner_instance === this.instance && row.phase !== 'UNCERTAIN')
-                this.transition(row.id, row.phase === 'RECEIVED' ? 'CANCELLED' : 'UNCERTAIN');
+                this.retireHandoff(row.id, true);
     }
     prune(olderThan = Date.now() - 7 * 86400000) {
         return this.transaction(() => {
@@ -127,10 +167,23 @@ export class Journal {
     close() {
         if (this.closed)
             return;
-        this.db.prepare('DELETE FROM leases WHERE owner_instance=?').run(this.instance);
-        this.db.prepare("UPDATE owners SET state='closed',updated_at=? WHERE instance=?").run(Date.now(), this.instance);
-        this.db.close();
-        this.closed = true;
+        try {
+            this.transaction(() => {
+                this.db.prepare('DELETE FROM leases WHERE owner_instance=?').run(this.instance);
+                this.db.prepare('DELETE FROM binding_reservations WHERE owner_instance=?').run(this.instance);
+                this.db.prepare("UPDATE owners SET state='closed',updated_at=? WHERE instance=?").run(Date.now(), this.instance);
+            });
+        }
+        finally {
+            // A failed durable write must still release the connection. The error
+            // propagates; persisted ownership remains conservative until recovery.
+            try {
+                this.db.close();
+            }
+            finally {
+                this.closed = true;
+            }
+        }
     }
 }
 //# sourceMappingURL=journal.js.map

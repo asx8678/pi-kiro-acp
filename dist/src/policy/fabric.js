@@ -5,7 +5,15 @@ import { agentDir, loadConfig } from '../config.js';
 import { BridgeError } from '../errors.js';
 import { object } from '../util.js';
 const config = loadConfig();
-export const FABRIC_POLICY_VERSION = 1;
+export const FABRIC_POLICY_VERSION = 2;
+export const REVIEWED_FABRIC_VERSION = '0.96.3';
+export const FABRIC_PATCH_FILES = [
+    'dist/chunks/chunk-ZRI433JP.js',
+    'dist/chunks/chunk-TGAVMUOS.js',
+    'dist/chunks/chunk-D4B4CCTA.js',
+    'dist/chunks/chunk-F72MAIQY.js',
+    'dist/worker.js',
+];
 export const WORKER_LIMITS = { maxConcurrent: 2, maxPerExecution: 4, maxDepth: 1, timeoutMs: 900000 };
 const record = (value) => object(value) ? value : {};
 const cap = (value, ceiling) => typeof value === 'number' && value > 0 ? Math.min(value, ceiling) : ceiling;
@@ -70,8 +78,12 @@ export function fabricGuardStatus() {
     try {
         const manifest = JSON.parse(fs.readFileSync(path.join(root, '.kiro-acp-policy.json'), 'utf8'));
         const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-        if (!object(manifest) || !object(pkg) || manifest.version !== FABRIC_POLICY_VERSION || pkg.version !== manifest.fabricVersion || !object(manifest.files) || Object.keys(manifest.files).length !== 5)
+        if (!object(manifest) || !object(pkg) || pkg.name !== 'pi-fabric' || manifest.version !== FABRIC_POLICY_VERSION || pkg.version !== REVIEWED_FABRIC_VERSION || pkg.version !== manifest.fabricVersion || !object(manifest.files)
+            || Object.keys(manifest.files).length !== FABRIC_PATCH_FILES.length
+            || !FABRIC_PATCH_FILES.every(name => Object.hasOwn(manifest.files, name)))
             throw new Error('version/manifest mismatch');
+        if (manifest.policy !== import.meta.url || manifest.policyHash !== createHash('sha256').update(fs.readFileSync(new URL(import.meta.url))).digest('hex'))
+            throw new Error('policy artifact changed');
         for (const [name, expected] of Object.entries(manifest.files)) {
             if (!/^dist\/(?:chunks\/)?[\w.-]+\.js$/.test(name))
                 throw new Error('invalid manifest path');
@@ -79,7 +91,7 @@ export function fabricGuardStatus() {
             if (actual !== expected)
                 throw new Error('installed dispatch code changed');
         }
-        return { installed: true, ready: true };
+        return { installed: true, ready: true, fabricVersion: REVIEWED_FABRIC_VERSION };
     }
     catch {
         return { installed: true, ready: false, reason: 'Fabric routing guard is missing or changed. In pi-kiro-acp run bun run patch:fabric, then restart Pi. A new Fabric version requires review before patching.' };

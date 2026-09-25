@@ -21,6 +21,7 @@ export interface UsageTheme {
 interface UsageInput extends UsagePanel {
     onSubmit?: (value: string) => void;
     onEscape?: () => void;
+    setValue?(value: string): void;
     handleInput(data: string): void;
 }
 export interface UsageUiPort {
@@ -37,5 +38,5 @@ export type UsageDashboard = ReturnType<CreditLedger['dashboard']>;
 export declare const creditNumber: (value: number) => string;
 export declare function totalText(totals: UsageTotals): string;
 export declare function dashboardText(data: UsageDashboard): string;
-export declare function openUsageDashboard(args: string, ctx: HostContext, ledger: CreditLedger, refresh: (force?: boolean) => Promise<AccountUsage>, ui?: UsageUiPort): Promise<void>;
+export declare function openUsageDashboard(args: string, ctx: HostContext, ledger: CreditLedger, refresh: (force?: boolean) => Promise<AccountUsage>, ui?: UsageUiPort, accountCacheMs?: number): Promise<void>;
 export {};

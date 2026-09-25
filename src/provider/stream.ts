@@ -47,6 +47,31 @@ export class LocalStream implements PiStream {
     }
     result(): Promise<Assistant> { return this.final.promise; }
 }
+/** Bound delivery even when the backing queue belongs to the installed Pi host.
+ * One extra terminal event is always allowed so overflow remains observable. */
+export class BoundedStream implements PiStream {
+    private queued = 0;
+    private ended = false;
+    constructor(private target: PiStream, private limit: number) {}
+    push(event: PiEvent): void {
+        if (this.ended) return;
+        const terminal = event.type === 'done' || event.type === 'error';
+        if (!terminal && this.queued >= this.limit)
+            throw new BridgeError('LIMIT', 'Pi event queue exceeded its configured bound.');
+        this.queued++;
+        try { this.target.push(event); }
+        catch (error) { this.queued--; throw error; }
+        if (terminal) this.ended = true;
+    }
+    end(result?: Assistant): void { this.ended = true; this.target.end(result); }
+    result(): Promise<Assistant> { return this.target.result(); }
+    async *[Symbol.asyncIterator](): AsyncIterator<PiEvent> {
+        for await (const event of this.target) {
+            this.queued = Math.max(0, this.queued - 1);
+            yield event;
+        }
+    }
+}
 export class StreamWriter {
     readonly message: Assistant;
     done = false;

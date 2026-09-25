@@ -27,6 +27,7 @@ export declare class Binding {
     private writer?;
     private current?;
     private expected;
+    private expectedHashes;
     private complete;
     private lease?;
     private abortCleanup?;
@@ -41,6 +42,7 @@ export declare class Binding {
     lastUsed: number;
     constructor(key: string, model: Model, effort: string | undefined, first: Snapshot, config: Config, journal: Journal, admission: Admission, metrics: Metrics);
     start(signal?: AbortSignal): Promise<void>;
+    private remember;
     needsRebuild(snap: Snapshot, model: Model, effort: string | undefined): boolean;
     /** Authoritative result is accepted only from the next effective Pi transcript. */
     acceptResult(snap: Snapshot): void;

@@ -1,0 +1,118 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
+import { applyFabricProfile, assertFabricProvider, guardFabricWorker, rejectFabricJev, fabricGuardStatus, FABRIC_PATCH_FILES, FABRIC_POLICY_VERSION, REVIEWED_FABRIC_VERSION } from '../src/policy/fabric.js';
+const sha = (s) => createHash('sha256').update(s).digest('hex');
+const temporary = (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kiro-compat-test-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    return root;
+};
+test('Fabric policy blocks foreign inference and unsafe worker routes before dispatch', () => {
+    assert.doesNotThrow(() => assertFabricProvider('kiro-acp'));
+    for (const provider of [undefined, '', 'openai', 'anthropic'])
+        assert.throws(() => assertFabricProvider(provider), /Kiro-only/);
+    assert.throws(rejectFabricJev, /Jev/);
+    for (const request of [{ runner: 'claude' }, { runner: 'veda' }, { model: 'openai/a' }, { model: 'kiro-acp/' }, { extensions: false }, { residency: 'durable' }, { transport: 'tmux' }])
+        assert.throws(() => guardFabricWorker(request), /Kiro-only|Efficiency/);
+    assert.throws(() => guardFabricWorker({}, { model: 'openai/a' }), /Kiro-only/);
+    const request = { model: 'kiro-acp/auto', timeoutMs: 9999999 };
+    assert.deepEqual(guardFabricWorker(request), { model: 'kiro-acp/auto', extensions: true, transport: 'process', timeoutMs: 900000 });
+    assert.equal(request.timeoutMs, 9999999);
+});
+test('Fabric merged profile cannot reenable Jev, foreign workers, prewalk or larger bounds', () => {
+    const raw = { jev: { enabled: true }, mcp: { jev: { semanticSearch: true } }, agents: { runner: 'claude', extensions: false, model: 'openai/a', maxConcurrent: 9, maxDepth: 9 }, prewalk: { enabled: true }, executor: { maxOutputChars: 99 } };
+    const fixed = applyFabricProfile(raw);
+    assert.equal(fixed.agents.runner, 'pi');
+    assert.equal(fixed.agents.model, 'kiro-acp/auto');
+    assert.equal(fixed.agents.maxConcurrent, 2);
+    assert.equal(fixed.agents.maxDepth, 1);
+    assert.equal(fixed.jev.enabled, false);
+    assert.equal(fixed.mcp.jev.semanticSearch, false);
+    assert.equal(fixed.prewalk.enabled, false);
+    assert.equal(fixed.executor.maxOutputChars, 99);
+    assert.equal(raw.jev.enabled, true);
+});
+test('Fabric readiness binds exact reviewed files, package identity and policy artifact', t => {
+    const profile = temporary(t), prior = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = profile;
+    t.after(() => { if (prior === undefined)
+        delete process.env.PI_CODING_AGENT_DIR;
+    else
+        process.env.PI_CODING_AGENT_DIR = prior; });
+    assert.deepEqual(fabricGuardStatus(), { installed: false, ready: true });
+    const root = path.join(profile, 'npm/node_modules/pi-fabric');
+    fs.mkdirSync(path.join(root, 'dist/chunks'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'pi-fabric', version: REVIEWED_FABRIC_VERSION }));
+    const policy = new URL('../src/policy/fabric.js', import.meta.url);
+    const manifest = { version: FABRIC_POLICY_VERSION, fabricVersion: REVIEWED_FABRIC_VERSION, policy: policy.href, policyHash: sha(fs.readFileSync(policy)), files: Object.fromEntries(FABRIC_PATCH_FILES.map(name => { fs.writeFileSync(path.join(root, name), '// inert fixture'); return [name, sha('// inert fixture')]; })) };
+    const save = (value) => fs.writeFileSync(path.join(root, '.kiro-acp-policy.json'), JSON.stringify(value));
+    assert.equal(fabricGuardStatus().ready, false);
+    save(manifest);
+    assert.equal(fabricGuardStatus().ready, true);
+    for (const broken of [{ ...manifest, policy: 'file:///elsewhere.js' }, { ...manifest, policyHash: 'changed' }, { ...manifest, version: 1 }, { ...manifest, fabricVersion: '0.94.0' }, { ...manifest, files: { ...manifest.files, 'dist/extra.js': 'x' } }]) {
+        save(broken);
+        assert.equal(fabricGuardStatus().ready, false);
+    }
+    const sameCount = structuredClone(manifest);
+    delete sameCount.files[FABRIC_PATCH_FILES[0]];
+    sameCount.files['dist/wrong.js'] = sha('');
+    save(sameCount);
+    assert.equal(fabricGuardStatus().ready, false);
+    save(manifest);
+    fs.appendFileSync(path.join(root, FABRIC_PATCH_FILES[0]), '\n// edited');
+    assert.equal(fabricGuardStatus().ready, false);
+});
+test('checked patch validates the complete plan, preserves shebang/backups, and checks without writes', async (t) => {
+    const moduleUrl = new URL('../../scripts/checked-patch.mjs', import.meta.url).href;
+    const { checkedPatch } = await import(moduleUrl);
+    const root = temporary(t), source = '#!/usr/bin/env node\noriginal\n';
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'fixture', version: '1' }));
+    fs.writeFileSync(path.join(root, 'a.js'), source);
+    fs.writeFileSync(path.join(root, 'b.js'), 'original');
+    const options = { root, packageName: 'fixture', packageVersion: '1', manifestName: 'manifest.json', specs: [
+            { name: 'a.js', sha256: sha(source), header: '// header\n', edits: [['original', 'patched']] },
+            { name: 'b.js', sha256: sha('original'), edits: [['original', 'patched']] },
+        ] };
+    assert.throws(() => checkedPatch({ ...options, check: true }), /missing or changed/);
+    assert.equal(fs.existsSync(path.join(root, 'manifest.json')), false);
+    assert.throws(() => checkedPatch({ ...options, packageVersion: '2' }), /fresh review/);
+    fs.writeFileSync(path.join(root, 'b.js'), 'tampered');
+    assert.throws(() => checkedPatch(options), /Unrecognized/);
+    assert.equal(fs.readFileSync(path.join(root, 'a.js'), 'utf8'), source);
+    assert.equal(fs.existsSync(path.join(root, 'a.js.kiro-acp-original')), false);
+    fs.writeFileSync(path.join(root, 'b.js'), 'original');
+    checkedPatch(options);
+    const first = fs.readFileSync(path.join(root, 'a.js'), 'utf8');
+    assert.equal(first, '#!/usr/bin/env node\n// header\npatched\n');
+    assert.equal(fs.readFileSync(path.join(root, 'a.js.kiro-acp-original'), 'utf8'), source);
+    checkedPatch(options);
+    checkedPatch({ ...options, check: true });
+    assert.equal(fs.readFileSync(path.join(root, 'a.js'), 'utf8'), first);
+    fs.appendFileSync(path.join(root, 'a.js'), '// local edit');
+    assert.throws(() => checkedPatch(options), /Modified/);
+});
+test('efficiency configuration pins reviewed Fabric without changing package filters', t => {
+    const profile = temporary(t), settingsFile = path.join(profile, 'settings.json');
+    fs.writeFileSync(settingsFile, JSON.stringify({ packages: ['npm:pi-fabric@0.94.0', { source: 'npm:pi-fabric', skills: [] }, 'npm:unrelated'] }));
+    const run = () => spawnSync(process.execPath, [fileURLToPath(new URL('../../scripts/configure-efficiency.mjs', import.meta.url))], {
+        encoding: 'utf8', timeout: 10000, env: { ...process.env, PI_CODING_AGENT_DIR: profile, PI_KIRO_ACP_CONFIG: path.join(profile, 'kiro-acp.json'), PI_OFFLINE: '1' },
+    });
+    const result = run();
+    assert.equal(result.status, 0, result.stderr);
+    const settings = fs.readFileSync(settingsFile, 'utf8');
+    assert.deepEqual(JSON.parse(settings).packages, [`npm:pi-fabric@${REVIEWED_FABRIC_VERSION}`, { source: `npm:pi-fabric@${REVIEWED_FABRIC_VERSION}`, skills: [] }, 'npm:unrelated']);
+    assert.equal(run().status, 0);
+    assert.equal(fs.readFileSync(settingsFile, 'utf8'), settings);
+    const fovea = path.join(profile, 'npm/node_modules/pi-fovea');
+    fs.mkdirSync(fovea, { recursive: true });
+    fs.writeFileSync(path.join(fovea, 'package.json'), JSON.stringify({ name: 'pi-fovea', version: 'unknown' }));
+    assert.notEqual(run().status, 0);
+    assert.equal(fs.readFileSync(settingsFile, 'utf8'), settings);
+});
+//# sourceMappingURL=compatibility-patches.test.js.map

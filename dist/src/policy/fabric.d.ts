@@ -1,5 +1,7 @@
 import { type Obj } from '../util.js';
-export declare const FABRIC_POLICY_VERSION = 1;
+export declare const FABRIC_POLICY_VERSION = 2;
+export declare const REVIEWED_FABRIC_VERSION = "0.96.3";
+export declare const FABRIC_PATCH_FILES: readonly ["dist/chunks/chunk-ZRI433JP.js", "dist/chunks/chunk-TGAVMUOS.js", "dist/chunks/chunk-D4B4CCTA.js", "dist/chunks/chunk-F72MAIQY.js", "dist/worker.js"];
 export declare const WORKER_LIMITS: {
     maxConcurrent: number;
     maxPerExecution: number;
@@ -16,5 +18,6 @@ export declare function applyFabricProfile(raw: Obj): Obj;
 export declare function fabricGuardStatus(): {
     installed: boolean;
     ready: boolean;
+    fabricVersion?: string;
     reason?: string;
 };

@@ -19,8 +19,15 @@ export declare class Journal {
     readonly db: DatabaseSync;
     readonly instance: string;
     closed: boolean;
+    private transactionActive;
+    get inTransaction(): boolean;
     constructor(dir: string);
     transaction<T>(fn: () => T): T;
+    /** Fence a provider turn across processes before recovery or any asynchronous startup.
+     * No expiry: a slow live owner must never lose exclusivity. At a tool boundary the
+     * durable handoff protects the conversation after this short-lived claim releases.
+     */
+    reserveBinding(binding: string): () => void;
     receive(input: {
         binding: string;
         generation: string;
@@ -39,6 +46,7 @@ export declare class Journal {
      * New writers publish the marker atomically with the handoff.
      */
     recoveryCandidates(binding: string): HandoffRow[];
+    private retireHandoff;
     reconcileDeadOwners(): void;
     ownerLive(instance: string, pid: number): boolean;
     abandonOwned(): void;
