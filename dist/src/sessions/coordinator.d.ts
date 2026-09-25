@@ -18,12 +18,14 @@ export declare class Binding {
     private journal;
     private admission;
     private metrics;
+    private outputTool?;
     readonly generation: string;
     readonly machine: StateMachine;
     readonly catalog: Catalog;
     readonly bridge: ToolServer;
     readonly kiro: V3Session;
     private pending?;
+    private outputRequest?;
     private writer?;
     private current?;
     private expected;
@@ -40,7 +42,7 @@ export declare class Binding {
     private observer?;
     private promptTask?;
     lastUsed: number;
-    constructor(key: string, model: Model, effort: string | undefined, first: Snapshot, config: Config, journal: Journal, admission: Admission, metrics: Metrics);
+    constructor(key: string, model: Model, effort: string | undefined, first: Snapshot, config: Config, journal: Journal, admission: Admission, metrics: Metrics, outputTool?: string | undefined);
     start(signal?: AbortSignal): Promise<void>;
     private remember;
     needsRebuild(snap: Snapshot, model: Model, effort: string | undefined): boolean;
@@ -49,6 +51,7 @@ export declare class Binding {
     run(snap: Snapshot, stream: PiStream, options: GenerationOptions, taskId: string): Promise<void>;
     private endPrompt;
     private receiveTool;
+    private receiveOutput;
     private release;
     private fail;
     private closeTask?;

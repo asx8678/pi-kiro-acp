@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Add an optional managed `pi` launcher that repairs and verifies Fabric before
+  extensions load, restores the reviewed version after updates, and keeps protocol
+  stdout clean. Serialize repairs, preserve shell/configuration backups, respect
+  offline mode, and refuse unrecognized modified dispatch code.
+- Isolate Fabric approval classification through an explicit structured-completion
+  capability, close its session before returning, and keep the paused main tool
+  handoff intact. Retain exact Kiro effort validation and caller cancellation.
+- Record completed Pi tool results before enforcing a credit cutoff, including
+  after restart, so known effects remain recoverable without further inference.
+- Preserve Fabric's explicit zero worker depth. Upgrade unchanged reviewed v2
+  dispatch patches to v3 while refusing modified installed code.
 - Generate a private installation ID once during setup using Crew's UUIDv4 hex
   format. Add an installer, package lifecycle hook and first-load fallback;
   preserve IDs across upgrades and concurrent starts, and keep them out of

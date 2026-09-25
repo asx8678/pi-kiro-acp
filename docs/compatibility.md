@@ -33,6 +33,18 @@ The checked source interface is recorded in `sources.md`. The static-import
 Pi 0.87.1 passed this check. Earlier Pi releases lacking these exports cannot be
 assumed compatible. See `testing.md` for the separate live check.
 
+The bridge also exposes `completeStructured(model, normalizedContext, options)`
+for callers that consume one declared tool as output data. This is a bridge
+capability, not a standard Pi provider API or a constrained-decoding guarantee.
+Fabric's reviewed v3 patch uses it for approvals, normalizes the classifier context,
+and retains Fabric's validation of the decision and reason. It can retrieve the
+capability from the registered native provider when Pi's model-settings wrapper
+omits extra methods; an older bridge without the capability is refused.
+The call uses an isolated session, honors cancellation and `timeoutMs`, and closes
+before returning. It leaves Kiro's effort automatic instead of requesting the
+generic classifier's potentially unsupported `minimal` effort. Ordinary tools
+named `classify_result` still require an authoritative Pi result.
+
 ## Tool-surface verification
 
 A `_kiro/tools/didChange` notification containing a complete `tools` array is

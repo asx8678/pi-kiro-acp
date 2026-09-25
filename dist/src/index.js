@@ -50,7 +50,13 @@ export async function installExtension(pi, ai, tui) {
             const result = await withAbort(loadCatalog(), ctx.signal);
             const next = result.models.map(m => toModel(m, config));
             await ctx.publish({ update: () => { models = next; } });
-        }, stream, streamSimple: stream, };
+        }, stream, streamSimple: stream,
+        // Explicit capability for result-only callers such as Fabric approvals.
+        completeStructured: (model, context, options) => {
+            checkFabric();
+            return runtime.completeStructured(model, context, options);
+        },
+    };
     pi.registerProvider(provider);
     let creditsUI;
     let usageSessionId = runtime.journal.instance;

@@ -38,6 +38,34 @@ test('Fabric merged profile cannot reenable Jev, foreign workers, prewalk or lar
     assert.equal(raw.jev.enabled, true);
 });
 
+test('Fabric profile preserves maxDepth zero without treating other zero limits as disabled', () => {
+    const agents = applyFabricProfile({ agents: { maxDepth: 0, maxConcurrent: 0, timeoutMs: 0 } }).agents as Record<string, unknown>;
+    assert.equal(agents.maxDepth, 0);
+    assert.equal(agents.maxConcurrent, 2);
+    assert.equal(agents.timeoutMs, 900000);
+    for (const maxDepth of [undefined, -1, NaN])
+        assert.equal((applyFabricProfile({ agents: { maxDepth } }).agents as Record<string, unknown>).maxDepth, 1);
+});
+
+test('checked patch upgrades only exact reviewed prior patches and keeps original backups', async t => {
+    const { checkedPatch } = await import(new URL('../../scripts/checked-patch.mjs', import.meta.url).href);
+    const root = temporary(t), file = path.join(root, 'code.js');
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'fixture', version: '1' }));
+    fs.writeFileSync(file, 'source');
+    const base = { root, packageName: 'fixture', packageVersion: '1', manifestName: 'manifest.json' };
+    const prior = { header: '// v2\n', edits: [['source', 'old patch']] };
+    checkedPatch({ ...base, specs: [{ name: 'code.js', sha256: sha('source'), ...prior }] });
+    const old = fs.readFileSync(file, 'utf8');
+    const next = { ...base, specs: [{ name: 'code.js', sha256: sha('source'), header: '// v3\n', edits: [['source', 'new patch']], previous: [prior] }] };
+    assert.throws(() => checkedPatch({ ...next, check: true }), /missing or changed/);
+    fs.appendFileSync(file, '\n// unrecognized change');
+    assert.throws(() => checkedPatch(next), /Modified/);
+    fs.writeFileSync(file, old);
+    checkedPatch(next); checkedPatch({ ...next, check: true }); checkedPatch(next);
+    assert.equal(fs.readFileSync(file, 'utf8'), '// v3\nnew patch');
+    assert.equal(fs.readFileSync(file + '.kiro-acp-original', 'utf8'), 'source');
+});
+
 test('Fabric readiness binds exact reviewed files, package identity and policy artifact', t => {
     const profile = temporary(t), prior = process.env.PI_CODING_AGENT_DIR;
     process.env.PI_CODING_AGENT_DIR = profile;

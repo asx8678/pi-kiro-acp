@@ -10,8 +10,13 @@ const fixture = path.join(project, 'fixture.ts');
 fs.writeFileSync(fixture, "export const liveMarker = 'BEFORE_HOST_EDIT';\n");
 const probe = path.join(project, 'probe.mjs');
 fs.writeFileSync(probe, `import fs from 'node:fs';
-export default pi => pi.registerTool({ name: 'opaque_mutate', label: 'Inert mutation', description: 'Offline fixture', parameters: { type: 'object', properties: {} },
-execute: async () => { fs.writeFileSync(${JSON.stringify(fixture)}, "export const liveMarker = 'AFTER_HOST_EDIT';\\n"); return { content: [{ type: 'text', text: 'mutated' }], details: {} }; } });\n`);
+import assert from 'node:assert/strict';
+export default pi => {
+let structuredCapability = false;
+pi.on('session_start', (_event, ctx) => { structuredCapability = typeof ctx.modelRegistry.getRegisteredNativeProvider('kiro-acp')?.completeStructured === 'function'; });
+pi.registerTool({ name: 'opaque_mutate', label: 'Inert mutation', description: 'Offline fixture', parameters: { type: 'object', properties: {} },
+execute: async () => { assert.ok(structuredCapability, 'Pi must retain the native structured-completion capability'); fs.writeFileSync(${JSON.stringify(fixture)}, "export const liveMarker = 'AFTER_HOST_EDIT';\\n"); return { content: [{ type: 'text', text: 'mutated' }], details: {} }; } });
+};\n`);
 const argumentFile = path.join(project, 'arguments.json');
 writePrivateJson(argumentFile, { code: `
 const root = ${JSON.stringify(project)};

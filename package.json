@@ -47,6 +47,7 @@
   "scripts": {
     "postinstall": "node dist/src/cli.js setup",
     "install:pi": "node scripts/install-pi.mjs",
+    "install:launcher": "node scripts/install-launcher.mjs",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node scripts/test.mjs",

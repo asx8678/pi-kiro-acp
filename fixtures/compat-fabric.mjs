@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { fabricGuardStatus } from '../dist/src/policy/fabric.js';
@@ -27,21 +28,44 @@ const classifier = new FabricAutoApprovalClassifier();
 await assert.rejects(classifier.classify({}, {}, { model: { provider: 'foreign' }, modelRegistry: { getApiKeyAndHeaders: async () => { credentials++; return { ok: true }; } } }), /Kiro-only/);
 assert.equal(credentials, 0); assert.equal(network, 0);
 let nativeCalls = 0;
-const decision = await classifier.classify({ ref: 'pi.read', risk: 'read', description: 'fixture' }, {}, {
-    cwd: process.cwd(), model: { provider: 'kiro-acp', id: 'auto' },
+const nativeProvider = { completeStructured: async (_model, transcript, options) => {
+    nativeCalls++;
+    assert.equal(transcript.messages[0].role, 'system', 'native provider must receive classifier instructions');
+    assert.ok(transcript.messages[0].toolsAdded.some(tool => tool.name === 'classify_result'));
+    assert.equal(options.reasoning, undefined, 'Kiro keeps its advertised automatic effort');
+    return { stopReason: 'toolUse', content: [{ type: 'toolCall', name: 'classify_result', arguments: { decision: 'allow', reason: 'offline fixture' } }], usage: {} };
+} };
+const classifierContext = {
+    cwd: process.cwd(), model: { provider: 'kiro-acp', id: 'auto', reasoning: true },
     sessionManager: { getSessionId: () => 'fixture', getBranch: () => [] },
     modelRegistry: {
         getApiKeyAndHeaders: async () => ({ ok: true }),
-        getProvider: () => ({ streamSimple: (_model, transcript) => {
-            nativeCalls++;
-            assert.equal(transcript.messages[0].role, 'system', 'native provider must receive classifier instructions');
-            assert.ok(transcript.messages[0].toolsAdded.some(tool => tool.name === 'classify_result'));
-            return { result: async () => ({ stopReason: 'toolUse', content: [{ type: 'toolCall', name: 'classify_result', arguments: { decision: 'allow', reason: 'offline fixture' } }], usage: {} }) };
-        } }),
+        getProvider: () => nativeProvider,
     },
-});
+};
+const action = { ref: 'pi.read', risk: 'read', description: 'fixture' };
+const decision = await classifier.classify(action, {}, classifierContext);
 assert.equal(decision.decision, 'allow'); assert.equal(nativeCalls, 1);
+// Pi's model-settings composer forwards standard methods only. Recover the
+// bridge capability from its native registry without falling back to an effect.
+const composedProvider = { streamSimple: () => { throw new Error('approval must never use a host-effect stream'); } };
+classifierContext.modelRegistry.getProvider = () => composedProvider;
+await assert.rejects(classifier.classify(action, {}, classifierContext), /updated ACP provider/);
+classifierContext.modelRegistry.getRegisteredNativeProvider = () => nativeProvider;
+assert.equal((await classifier.classify(action, {}, classifierContext)).decision, 'allow');
+assert.equal(nativeCalls, 2);
 const config = loadFabricConfig({ agentDir: process.env.PI_CODING_AGENT_DIR, cwd: process.cwd(), projectTrusted: false });
 assert.equal(config.agents.model, 'kiro-acp/auto'); assert.equal(config.jev.enabled, false);
 assert.equal(config.agents.maxConcurrent, 2); assert.equal(config.agents.maxDepth, 1);
+const disabledProfile = path.join(process.cwd(), 'disabled-workers');
+fs.mkdirSync(disabledProfile, { recursive: true });
+fs.writeFileSync(path.join(disabledProfile, 'fabric.json'), JSON.stringify({ configVersion: 4, agents: { maxDepth: 0 } }));
+const disabledConfig = loadFabricConfig({ agentDir: disabledProfile, cwd: process.cwd(), projectTrusted: false });
+assert.equal(disabledConfig.agents.maxDepth, 0);
+const disabledManager = new AgentManager(process.cwd(), disabledConfig.agents, {
+    runRoot: path.join(process.cwd(), 'disabled-runs'),
+    preparePiModel: async () => { throw new Error('zero-depth workers must not prepare a model'); },
+});
+try { await assert.rejects(disabledManager.spawn({ task: 'Never execute inference.' }), /depth limit reached \(0\)/); }
+finally { await disabledManager.close(); }
 console.log(JSON.stringify({ check: 'real Fabric dispatch guards and merged profile', result: 'passed', credentials, network, preparations }));

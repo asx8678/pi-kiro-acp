@@ -67,7 +67,35 @@ export class ProviderRuntime {
         void task.finally(() => this.inFlight.delete(task));
         return stream;
     }
-    async execute(model, context, options, stream) {
+    /** One declared tool is an output schema, never a host action. Return only after
+     * the isolated session, held HTTP response and admission lease have closed. */
+    async completeStructured(model, context, options = {}) {
+        const timeoutMs = options.timeoutMs ?? this.config.cli.promptTimeoutMs;
+        if (!Number.isSafeInteger(timeoutMs) || Number(timeoutMs) <= 0 || Number(timeoutMs) > 2147483647)
+            throw new BridgeError('CONFIG', 'Structured completion timeoutMs must be a positive bounded integer.');
+        const signal = AbortSignal.any([this.lifetime.signal, AbortSignal.timeout(Number(timeoutMs)), ...(options.signal ? [options.signal] : [])]);
+        const stream = new LocalStream(this.config.limits.maxQueuedEvents);
+        // A completion caller consumes only the final message; drain intermediate
+        // events here so its backing queue stays bounded without dropping output.
+        const result = (async () => { for await (const _ of stream) { } return stream.result(); })();
+        const task = this.execute(model, context, { ...options, signal }, stream, true);
+        this.inFlight.add(task);
+        try {
+            await task;
+            throwIfAborted(signal);
+            return await result;
+        }
+        catch (error) {
+            new StreamWriter(stream, model, this.config.limits.maxOutputBytes).fail(error);
+            await result;
+            // A cleanup failure must override an internally completed tool message.
+            throw error;
+        }
+        finally {
+            this.inFlight.delete(task);
+        }
+    }
+    async execute(model, context, options, stream, structuredOutput = false) {
         if (this.closed)
             throw new BridgeError('TRANSPORT', 'Provider runtime is closed.');
         if (this.resetting)
@@ -81,7 +109,6 @@ export class ProviderRuntime {
         if (options.env && Object.keys(options.env).length)
             throw new BridgeError('UNSUPPORTED', 'Per-request environment overrides are not supported; configure the trusted Kiro CLI environment before starting Pi.');
         throwIfAborted(options.signal);
-        this.credits.assertAvailable();
         // Capture request ownership before asynchronous hooks or startup can let
         // another host task/session replace the mutable foreground context.
         const logicalId = options.sessionId || this.host.sessionManager?.getSessionId?.() || this.fallbackSession;
@@ -101,7 +128,9 @@ export class ProviderRuntime {
         if (this.closed)
             throw cancelled();
         const snap = snapshot(effective, this.extractors, options.toolChoice === 'none', this.config.limits.maxPromptBytes);
-        const auxiliary = options.toolChoice === 'none' || snap.tools.length === 0;
+        if (structuredOutput && snap.tools.length !== 1)
+            throw new BridgeError('UNSUPPORTED', 'Structured completion requires exactly one output tool schema.');
+        const auxiliary = structuredOutput || options.toolChoice === 'none' || snap.tools.length === 0;
         // Preserve the original epoch-zero encoding for on-disk compatibility. A fresh
         // Binding.generation, not a new recovery identity, distinguishes rebuilt sessions.
         const key = hash({ scope: this.config.admission.scope, session: logicalId, epoch: 0, cwd, purpose: auxiliary ? uid('aux_') : 'agent' });
@@ -143,6 +172,9 @@ export class ProviderRuntime {
             }
             if (binding?.hasPending)
                 binding.acceptResult(snap);
+            // A budget veto prevents more inference, not recording an action Pi has
+            // already completed. Admission checks again before releasing any result.
+            this.credits.assertAvailable();
             if (binding?.needsRebuild(snap, model, typeof options.reasoning === 'string' ? options.reasoning : undefined)) {
                 await this.evict(key, binding);
                 binding = undefined;
@@ -155,7 +187,7 @@ export class ProviderRuntime {
                     throw cancelled();
                 if (this.bindings.size >= this.config.sessions.maxResident)
                     throw new BridgeError('LIMIT', 'Resident Kiro session limit reached. Close idle sessions or increase the explicit limit.');
-                binding = new Binding(key, model, typeof options.reasoning === 'string' ? options.reasoning : undefined, snap, this.config, this.journal, this.admission, this.metrics);
+                binding = new Binding(key, model, typeof options.reasoning === 'string' ? options.reasoning : undefined, snap, this.config, this.journal, this.admission, this.metrics, structuredOutput ? snap.tools[0].name : undefined);
                 this.bindings.set(key, binding);
                 await binding.start(options.signal);
             }

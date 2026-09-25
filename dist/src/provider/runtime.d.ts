@@ -1,5 +1,5 @@
 import type { Config } from '../config.js';
-import type { Model, PiStream, EffectiveContext, GenerationOptions, Extractors, HostContext, ModelEntry } from '../types.js';
+import type { Assistant, Model, PiStream, EffectiveContext, GenerationOptions, Extractors, HostContext, ModelEntry } from '../types.js';
 import { type Obj } from '../util.js';
 import { Journal } from '../storage/journal.js';
 import { CreditLedger } from '../storage/credits.js';
@@ -29,6 +29,9 @@ export declare class ProviderRuntime {
     constructor(config: Config, extractors?: Extractors, streamFactory?: () => PiStream);
     setHost(ctx: HostContext): void;
     generate(model: Model, context: EffectiveContext, options?: GenerationOptions): PiStream;
+    /** One declared tool is an output schema, never a host action. Return only after
+     * the isolated session, held HTTP response and admission lease have closed. */
+    completeStructured(model: Model, context: EffectiveContext, options?: GenerationOptions): Promise<Assistant>;
     private execute;
     discover(signal?: AbortSignal): Promise<{
         models: ModelEntry[];

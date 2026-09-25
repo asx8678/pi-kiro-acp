@@ -32,11 +32,15 @@ test('extension registers a native Pi provider and current lifecycle hooks', asy
         assert.equal(m.reasoning, true);
         const a = await collect(provider.streamSimple(m, context('plain text'), {}));
         assert.equal(a.stopReason, 'stop');
+        const output = await provider.completeStructured(m, context(), { sessionId: 'pi-host' });
+        assert.equal(output.stopReason, 'toolUse');
+        assert.deepEqual(r.journal.unresolved(), [], 'registered structured completion must not create a host effect');
         let aborted = false;
         assert.throws(() => handlers.get('before_provider_request')({}, { ...host, model: { provider: 'other', id: 'x' }, abort: () => { aborted = true; } }), /Kiro-only/);
         assert.equal(aborted, true);
     }
     finally {
+        await handlers.get('session_shutdown')({}, { cwd: process.cwd() });
         await cleanup(r, c);
         if (old === undefined)
             delete process.env.PI_KIRO_ACP_CONFIG;

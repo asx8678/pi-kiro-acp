@@ -5,7 +5,7 @@ import { installExtension } from '../src/index.js';
 import { LocalStream, StreamWriter } from '../src/provider/stream.js';
 import { fallbackExtractors } from '../src/context/snapshot.js';
 import { writePrivateJson } from '../src/config.js';
-import type { PiPort, HostContext, Model, EffectiveContext, PiStream, GenerationOptions } from '../src/types.js';
+import type { PiPort, HostContext, Model, EffectiveContext, PiStream, GenerationOptions, Assistant } from '../src/types.js';
 import type { Obj } from '../src/util.js';
 import { BridgeError } from '../src/errors.js';
 import { config, model, context, collect, cleanup } from './helpers.js';
@@ -19,6 +19,7 @@ test('extension registers a native Pi provider and current lifecycle hooks', asy
         id: string;
         getModels: () => Model[];
         streamSimple: (m: Model, c: EffectiveContext, o: GenerationOptions) => PiStream;
+        completeStructured: (m: Model, c: EffectiveContext, o: GenerationOptions) => Promise<Assistant>;
     } | undefined;
     let command: Parameters<PiPort['registerCommand']>[1] | undefined;
     const pi: PiPort = { registerProvider: p => { provider = p as typeof provider; }, registerCommand: (name, c) => { if (name === 'kiro') command = c; }, on: (event, handler) => { handlers.set(event, handler); } };
@@ -37,11 +38,15 @@ test('extension registers a native Pi provider and current lifecycle hooks', asy
         assert.equal(m.reasoning, true);
         const a = await collect(provider!.streamSimple(m, context('plain text'), {}));
         assert.equal(a.stopReason, 'stop');
+        const output = await provider!.completeStructured(m, context(), { sessionId: 'pi-host' });
+        assert.equal(output.stopReason, 'toolUse');
+        assert.deepEqual(r.journal.unresolved(), [], 'registered structured completion must not create a host effect');
         let aborted = false;
         assert.throws(() => handlers.get('before_provider_request')!({}, { ...host, model: { provider: 'other', id: 'x' }, abort: () => { aborted = true; } }), /Kiro-only/);
         assert.equal(aborted, true);
     }
     finally {
+        await handlers.get('session_shutdown')!({}, { cwd: process.cwd() });
         await cleanup(r, c);
         if (old === undefined)
             delete process.env.PI_KIRO_ACP_CONFIG;

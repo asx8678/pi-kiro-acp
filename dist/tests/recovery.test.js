@@ -9,6 +9,65 @@ import { Catalog } from '../src/tools/catalog.js';
 import { alive, deferred } from '../src/util.js';
 import { config, model, context, collect, addResult, cleanup } from './helpers.js';
 const timeout = { timeout: 15000 };
+for (const owner of ['active', 'restarted'])
+    test(`budget cutoff records the ${owner} owner's completed tool before refusing continuation`, timeout, async () => {
+        const c = config();
+        c.budget.dailyCredits = 1;
+        let r = new ProviderRuntime(c);
+        const ctx = context(), sessionId = 'budget-with-completed-effect';
+        try {
+            const first = await collect(r.generate(model(c), ctx, { sessionId }));
+            assert.equal(first.stopReason, 'toolUse');
+            const row = r.journal.unresolved()[0];
+            const task = r.credits.ensureTask({ sessionId: 'worker', summary: 'Offline worker accounting' });
+            r.credits.start('worker-prompt', 'auto', Date.now(), task);
+            r.credits.record({ promptId: 'worker-prompt', total: 1, delta: 1, reports: 1, source: 'turn_completion' });
+            r.credits.finish('worker-prompt');
+            addResult(ctx, first);
+            if (owner === 'restarted') {
+                await r.close();
+                r = new ProviderRuntime(c);
+            }
+            // A model/context change must not rebuild and infer before the budget veto.
+            const response = await collect(r.generate(model(c, 'auto'), ctx, { sessionId }));
+            assert.equal(response.stopReason, 'error');
+            assert.match(response.errorMessage, /Daily Kiro budget reached/);
+            const retired = r.journal.get(row.id);
+            assert.equal(retired.phase, 'CANCELLED');
+            assert.ok(retired.result_hash, 'the authoritative result remains durable');
+            assert.deepEqual(r.journal.unresolved(), []);
+            assert.deepEqual(r.admission.status(), []);
+            assert.equal(r.journal.db.prepare('SELECT COUNT(*) AS n FROM credit_prompts').get()?.n, 2, 'no further inference was admitted');
+            await r.abortActive();
+            await r.reset();
+            // Fresh requests also fail before inspecting or starting the configured CLI.
+            c.cli.binary = '/nonexistent/review-fixture-cli';
+            const fresh = await collect(r.generate(model(c), context('New task'), { sessionId: 'new-session' }));
+            assert.match(fresh.errorMessage, /Daily Kiro budget reached/);
+        }
+        finally {
+            await cleanup(r, c);
+        }
+    });
+test('an exhausted budget cannot silently reconcile a missing host result', timeout, async () => {
+    const c = config();
+    c.budget.dailyCredits = 1;
+    const r = new ProviderRuntime(c), ctx = context();
+    try {
+        const first = await collect(r.generate(model(c), ctx));
+        assert.equal(first.stopReason, 'toolUse');
+        const prompt = r.journal.db.prepare('SELECT id FROM credit_prompts').get();
+        r.credits.record({ promptId: String(prompt.id), total: 1, delta: 1, reports: 1, source: 'turn_completion' });
+        ctx.messages.push(first);
+        const response = await collect(r.generate(model(c), ctx));
+        assert.match(response.errorMessage, /UNCERTAIN/);
+        assert.equal(r.journal.unresolved()[0]?.phase, 'UNCERTAIN');
+        assert.equal(r.journal.unresolved()[0]?.result_hash, null);
+    }
+    finally {
+        await cleanup(r, c);
+    }
+});
 const tick = () => new Promise(resolve => setImmediate(resolve));
 test('cancel then reset cannot bypass an unrecorded host effect', timeout, async () => {
     const c = config(), r = new ProviderRuntime(c), ctx = context();

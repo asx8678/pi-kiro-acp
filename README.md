@@ -26,6 +26,21 @@ pins it in Pi settings and the package manifest, and verifies its routing patch.
 After reinstalling Fabric or rebuilding bridge policy code, run `bun run repair:fabric`
 and restart Pi. This preserves your other Pi settings and refuses unrecognized patch sources.
 
+To make repairs automatic when starting Pi, run once (zsh or bash):
+
+```sh
+bun run install:launcher
+```
+
+Open a new terminal, then use `pi` normally. The launcher checks Fabric before Pi
+loads extensions, repairs recognized patches, and restores/pins the bridge's
+reviewed Fabric version if it drifted. A healthy start makes no changes or package
+downloads. Upstream Pi stays intact; shell configuration is backed up. Unsupported
+Fabric releases are downgraded to the reviewed version, never automatically approved.
+Offline starts can repair local patches but refuse required package downloads.
+Already running Pi sessions/workers still need restarting after maintenance.
+Launches that bypass the managed executable retain the existing manual repair check.
+
 ## Inside Pi
 
 | Command | Action |

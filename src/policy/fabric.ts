@@ -6,7 +6,7 @@ import { BridgeError } from '../errors.js';
 import { object, type Obj } from '../util.js';
 
 const config = loadConfig();
-export const FABRIC_POLICY_VERSION = 2;
+export const FABRIC_POLICY_VERSION = 3;
 export const REVIEWED_FABRIC_VERSION = '0.96.3';
 export const FABRIC_PATCH_FILES = [
     'dist/chunks/chunk-ZRI433JP.js',
@@ -17,7 +17,7 @@ export const FABRIC_PATCH_FILES = [
 ] as const;
 export const WORKER_LIMITS = { maxConcurrent: 2, maxPerExecution: 4, maxDepth: 1, timeoutMs: 900000 };
 const record = (value: unknown): Obj => object(value) ? value : {};
-const cap = (value: unknown, ceiling: number): number => typeof value === 'number' && value > 0 ? Math.min(value, ceiling) : ceiling;
+const cap = (value: unknown, ceiling: number, allowZero = false): number => typeof value === 'number' && (value > 0 || (allowZero && value === 0)) ? Math.min(value, ceiling) : ceiling;
 
 /** Called by the installed Fabric dispatch patch, before resolving credentials or spawning. */
 export function assertFabricProvider(provider: unknown): void {
@@ -65,7 +65,7 @@ export function applyFabricProfile(raw: Obj): Obj {
     if (config.efficiency.enabled) {
         const agents = record(value.agents), executor = record(value.executor);
         value.fullCodeMode = true;
-        value.agents = { ...agents, transport: 'process', ...Object.fromEntries(Object.entries(WORKER_LIMITS).map(([key, limit]) => [key, cap(agents[key], limit)])) };
+        value.agents = { ...agents, transport: 'process', ...Object.fromEntries(Object.entries(WORKER_LIMITS).map(([key, limit]) => [key, cap(agents[key], limit, key === 'maxDepth')])) };
         value.executor = { ...executor, maxOutputChars: cap(executor.maxOutputChars, 12000), maxNestedResultChars: cap(executor.maxNestedResultChars, 64000) };
         value.prewalk = { ...record(value.prewalk), enabled: false, alwaysRearm: false, model: 'kiro-acp/auto', thinking: 'low' };
         value.compaction = { ...record(value.compaction), engine: 'fabric', targetContextRatio: 0.5 };
@@ -74,8 +74,8 @@ export function applyFabricProfile(raw: Obj): Obj {
 }
 
 /** Detect an update that removed or changed the reviewed patch before allowing Fabric calls. */
-export function fabricGuardStatus(): { installed: boolean; ready: boolean; fabricVersion?: string; reason?: string } {
-    const root = path.join(agentDir(), 'npm', 'node_modules', 'pi-fabric');
+export function fabricGuardStatus(dir = agentDir()): { installed: boolean; ready: boolean; fabricVersion?: string; reason?: string } {
+    const root = path.join(dir, 'npm', 'node_modules', 'pi-fabric');
     if (!fs.existsSync(path.join(root, 'package.json')))
         return { installed: false, ready: true };
     const recovery = 'In pi-kiro-acp run bun run repair:fabric, then restart Pi. Unreviewed Fabric versions remain blocked.';

@@ -61,6 +61,15 @@ The Pi stream and ACP prompt have different lifetimes. One ACP prompt may yield
 several Pi streams at tool boundaries. A Pi `done(toolUse)` does not imply that
 the ACP prompt is over.
 
+The bridge's `completeStructured` capability explicitly declares one tool as an
+output schema. It uses a unique auxiliary binding even when the caller shares the
+main Pi session ID, while retaining that session's credit attribution. Its MCP
+arguments become return data without a host effect or journal handoff. Admission
+and the MCP response stay held until the isolated Kiro session closes; only then
+does the completion promise return. Cancellation, timeout and cleanup failure
+cannot publish a successful decision. Ordinary streamed tools retain the normal
+handoff lifecycle regardless of their names.
+
 ## Handoff sequence
 
 1. The authenticated MCP call names a tool from the immutable current catalog.
@@ -94,6 +103,12 @@ changed tool schema, rewritten prefix, model/effort change, observed compaction,
 or unqualified new steering at a held boundary triggers rebuilding from Pi's
 current context. An actual result is accepted before teardown so a completed
 project effect is not repeated.
+
+A completed Pi result is also recorded before checking the shared credit cutoff,
+including during restart recovery. A reached cutoff then retires the old transport
+without another prompt or continuation; its recorded result hash remains durable.
+Missing or ambiguous results still require reconciliation. Admission rechecks the
+cutoff immediately before allowing inference.
 
 The ordered-steering path exists only for exact versions qualified by the
 operator. A queue acknowledgment alone is not considered universal evidence of

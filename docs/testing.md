@@ -23,12 +23,27 @@ checks use this harness too. `npm run check` does not require Bun; an alternativ
 dependency install is `npm install --ignore-scripts --omit=peer`. The Bun lockfile
 uses public registry URLs rather than an authenticated private mirror.
 
+`tests/launcher.test.ts` covers startup repair decisions, pin drift, offline and
+worker refusals, shell argument/exit-status preservation, failed-repair startup
+blocking, idempotent installation, and cross-process repair locking. The
+compatibility suite also runs `fixtures/compat-launcher.mjs` against disposable
+copies of actual reviewed Fabric files: missing patches, reinstalls, stale policy
+hashes, unknown edits, settings preservation, and clean protocol stdout. It sends
+no model prompts or package-install requests.
+
 Dedicated recovery/accounting regressions cover cancel/reset/restart, opaque
 legacy keys, duplicate results, simultaneous continuations, reset/startup exclusion,
 blocked stdin with ignored SIGTERM, immutable session/task attribution, floating
 credit corrections and budget reopening, estimated token envelopes/aliases,
 partial token coverage, ambiguous account allowances and both Paris DST changes.
 These use synthetic accounting and the offline fixture, not billed requests.
+
+`tests/structured-output.test.ts` covers approval-style completions alongside a
+paused main handoff, shared accounting, repeated calls, cancellation, shutdown,
+deadlines, output limits and cleanup failures. A normal tool named `classify_result`
+still enters the effect journal. Recovery tests also verify that completed results
+are recorded before a budget cutoff, both in a live binding and after restart,
+without admitting more inference or accepting missing results.
 
 The fixture implements the expected ACP dialect and uses a **real** subprocess
 and **real** authenticated loopback MCP calls. It performs no inference or
@@ -201,7 +216,8 @@ remain pending.
 ## Compatibility patch regressions
 
 `tests/compatibility-patches.test.ts` verifies provider/worker denials, merged
-profile limits, exact readiness metadata, patch prevalidation/idempotence and
+profile limits (including zero worker depth), exact readiness metadata, patch
+prevalidation/idempotence, upgrades from exact reviewed prior patches and
 configuration pins without needing installed Fabric or Fovea.
 
 With Pi, Fabric **0.96.3**, Fovea **0.31.1**, Git and ast-grep installed:
@@ -212,16 +228,25 @@ npm run test:compat
 ```
 
 This copies the packages to a disposable profile. It reproduces the original
-Fovea bug, applies and verifies both patches, tests real Fabric dispatch before
-credentials/network, checks native approval context normalization with an inert
-provider, and tests non-Git/Git refreshes, concurrent hints, additions/deletions
-and exact-snapshot reuse. Finally installed Pi executes actual `fabric_exec`
-with custom and native edits plus same-invocation Fovea calls through fake ACP.
+Fovea bug, upgrades the installed reviewed Fabric patch in the copy, and separately
+applies and verifies both patches from pristine sources. It tests real Fabric
+dispatch before credentials/network, zero-depth worker refusal, approval context
+normalization and native capability lookup through Pi model wrappers. The real
+classifier also calls the registered bridge through fake ACP while the main tool
+is paused and repeatedly while idle, checking cleanup, invalid-decision refusal
+and shared accounting. Fovea checks cover non-Git/Git refreshes, concurrent hints,
+additions/deletions and exact-snapshot reuse. Finally installed Pi executes actual
+`fabric_exec` with custom and native edits plus same-invocation Fovea calls through
+fake ACP, and checks that Pi retains the registered completion capability.
 It sends **no paid prompts** and changes no normal-profile packages/settings.
 An optional positional path selects the source `npm/node_modules` directory;
 `--keep` retains the disposable profile for inspection instead of deleting it.
 These are offline compatibility checks, not evidence of vendor timeouts or billing.
 See [the current blocker ledger](blocker-fixes.md) for subsequent live results.
+
+The review fixes passed typecheck/build, all 236 tests, the installed-Pi offline
+check, and this compatibility suite on 2026-09-25. No paid prompts were sent and
+normal-profile packages/settings were not modified by verification.
 
 ## Required live qualification
 

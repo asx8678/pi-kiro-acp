@@ -238,10 +238,14 @@ Fabric 0.96.3 has no public hook that enforces provider policy at every built-in
 inference dispatch point. `patch:fabric` therefore applies a narrowly scoped,
 version- and SHA-256-checked local patch to worker launch, model preparation,
 auto-approval completion, Jev requests, worker relaunch and merged configuration.
-Native approval calls normalize Pi's legacy context so system instructions and
-classification schemas reach the native provider. This does not qualify billed
-auto-approval inference. Original files are retained beside patched files. Every
-source hash and anchor is checked before editing; `--check` verifies without writes.
+Native approval calls normalize Pi's legacy context and use an isolated structured
+completion so a classifier cannot take over a paused main handoff or leave an
+unanswered tool result. This does not qualify billed auto-approval inference.
+An explicit `agents.maxDepth: 0` remains zero and disables worker launches.
+Original files are retained beside patched files. Every source hash and anchor is
+checked before editing; `--check` verifies without writes. The v3 patch accepts
+byte-exact reviewed v2 patches for upgrade and refuses local modifications. Updating
+the patch does not require resetting the efficiency profile settings.
 The bridge checks the exact manifest paths, package version and policy artifact
 hash before serving inference or allowing `fabric_exec`. After rebuilding changed
 policy code, rerun the patch. The former 0.94.0 patch is no longer the current target.
@@ -255,6 +259,25 @@ to that reviewed version; it never selects the latest unreviewed release. The
 normal `install:pi` workflow also runs this repair when Fabric is selected or installed.
 Startup reports a mismatch before the first prompt; dispatch remains blocked until
 repair succeeds. Stop Pi before maintenance and restart existing workers afterward.
+For automatic repair, run `bun run install:launcher` once and open a new terminal.
+The managed `pi` command verifies readiness before executing upstream Pi, repairs
+known local patches and stale policy hashes, and restores the reviewed package
+version/pins when necessary. The original Pi executable is not replaced. A small
+backed-up shell block puts the managed launcher first on PATH; remove that block
+to opt out. This setup supports zsh/bash on POSIX systems. Rerun it after moving
+the bridge or changing the upstream Pi executable path.
+
+Healthy starts perform only local reads. Repair messages go to stderr, and a
+failed repair prevents that Pi process from launching. Repairs use a shared
+profile lock; a complete dead-process lock can be recovered, while a live or
+incomplete lock is never guessed away. Offline mode permits local patch repair
+but refuses package installation. Workers never initiate a repair. Package
+maintenance commands such as `pi update` pass through; the next ordinary start
+revalidates their effects. Direct launches of the upstream binary and SDK hosts
+bypass this launcher and still require explicit maintenance. Never interpret
+this as approval for arbitrary new Fabric releases: it can downgrade them to the
+bridge's reviewed version. Existing Pi processes must restart after a repair.
+
 A different
 Fabric version is rejected until its dispatch paths are reviewed. This protects
 the reviewed built-in Fabric paths; it is not an operating-system network sandbox

@@ -19,15 +19,24 @@ const run = (file, args = []) => {
     return result.stdout.trim();
 };
 try {
-    const pi = fs.realpathSync(execFileSync(process.platform === 'win32' ? 'where' : 'which', [process.env.PI_BIN || 'pi'], { encoding: 'utf8' }).trim().split(/\r?\n/)[0]);
+    let pi = fs.realpathSync(execFileSync(process.platform === 'win32' ? 'where' : 'which', [process.env.PI_BIN || 'pi'], { encoding: 'utf8' }).trim().split(/\r?\n/)[0]);
+    const launcher = fs.readFileSync(pi, 'utf8');
+    if (launcher.startsWith('#!/bin/sh\n# pi-kiro-acp managed launcher\n')) {
+        const target = launcher.match(/\nexec '((?:[^']|'\\'')*)' "\$@"\n$/);
+        if (!target) throw new Error('Cannot resolve managed Pi launcher; rerun install:launcher');
+        pi = fs.realpathSync(target[1].replaceAll("'\\''", "'"));
+    }
+    let sdk = path.dirname(pi);
+    while (!fs.existsSync(path.join(sdk, 'package.json'))) {
+        const parent = path.dirname(sdk);
+        if (parent === sdk) throw new Error('Cannot locate Pi package');
+        sdk = parent;
+    }
+    if (JSON.parse(fs.readFileSync(path.join(sdk, 'package.json'), 'utf8')).name !== '@earendil-works/pi-coding-agent')
+        throw new Error('Selected executable does not belong to the upstream Pi package');
+    env.PI_BIN = pi;
     const require = createRequire(pi);
     for (const name of ['@earendil-works/pi-coding-agent', '@earendil-works/pi-tui']) {
-        let sdk = path.dirname(pi);
-        while (!fs.existsSync(path.join(sdk, 'package.json'))) {
-            const parent = path.dirname(sdk);
-            if (parent === sdk) throw new Error('Cannot locate Pi package');
-            sdk = parent;
-        }
         const directory = name === '@earendil-works/pi-coding-agent' ? sdk
             : require.resolve.paths(name).map(base => path.join(base, name)).find(candidate => fs.existsSync(path.join(candidate, 'package.json')));
         if (!directory) throw new Error(`Cannot locate ${name}`);
@@ -42,6 +51,12 @@ try {
         fs.cpSync(source, target, { recursive: true,
             filter: file => !['node_modules', '.git'].includes(path.basename(file)),
         });
+        if (name === 'pi-fabric') {
+            // Exercise upgrades of the installed reviewed patch before separately
+            // checking fresh installation from the pristine upstream backups.
+            run('scripts/patch-fabric.mjs', [target]);
+            run('scripts/patch-fabric.mjs', [target, '--check']);
+        }
         // Test from reviewed originals even if the source installation is patched.
         const restore = dir => { for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
             const file = path.join(dir, entry.name);
@@ -57,6 +72,8 @@ try {
         run(script, [target]); run(script, [target]); run(script, [target, '--check']);
     }
     console.log(run('fixtures/compat-fabric.mjs', [fabric]));
+    console.log(run('fixtures/compat-launcher.mjs', [fabric]));
+    console.log(run('fixtures/compat-approvals.mjs', [fabric]));
     console.log(run('fixtures/compat-fovea.mjs', [fovea, 'after']));
     console.log(run('fixtures/compat-host.mjs', [profile]));
     console.log(JSON.stringify({ result: 'passed', productionPackagesChanged: false, paidPrompts: 0 }));

@@ -5,19 +5,40 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { agentDir, writePrivateJson } from '../dist/src/config.js';
 import { REVIEWED_FABRIC_VERSION } from '../dist/src/policy/fabric.js';
+import { withFabricLock } from './fabric-lock.mjs';
 
 const patch = fileURLToPath(new URL('./patch-fabric.mjs', import.meta.url));
 const read = file => fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
 const fabricSource = source => typeof source === 'string' && /^npm:pi-fabric(?:@[^/]+)?$/.test(source);
 const runCommand = (command, args, options) => {
-    const result = spawnSync(command, args, { ...options, stdio: 'inherit', shell: false });
+    // Keep machine-readable Pi stdout clean when called by the launcher.
+    const result = spawnSync(command, args, { ...options, stdio: ['ignore', 2, 2], shell: false });
     if (result.error) throw result.error;
     if (result.status !== 0) throw new Error(`${path.basename(command)} failed (${result.status ?? result.signal}). Fabric repair is incomplete; rerun before starting Pi.`);
 };
 
-// Explicit maintenance only: never download packages or rewrite dispatch code in
-// a running Pi session. The ordinary installer also uses this same workflow.
-export function repairFabric({ dir = agentDir(), run = runCommand, report = console.log } = {}) {
+// Runs before Pi loads extensions, or during explicit maintenance. Never call
+// from a running extension: already imported modules cannot be repaired in place.
+export function repairFabric(options = {}) {
+    const dir = options.dir ?? agentDir();
+    // Preserve the optional-Fabric no-op without creating profile directories.
+    if (!fs.existsSync(dir)) return;
+    return withFabricLock(dir, () => repairUnlocked({ ...options, dir }));
+}
+
+export function fabricInstallState(dir = agentDir()) {
+    const settings = read(path.join(dir, 'settings.json'));
+    const pkg = read(path.join(dir, 'npm/package.json'));
+    const installed = read(path.join(dir, 'npm/node_modules/pi-fabric/package.json'));
+    const sources = (settings.packages ?? []).map(entry => typeof entry === 'string' ? entry : entry?.source).filter(fabricSource);
+    return {
+        present: sources.length > 0 || Boolean(installed.name),
+        needsInstall: installed.name !== 'pi-fabric' || installed.version !== REVIEWED_FABRIC_VERSION || pkg.dependencies?.['pi-fabric'] !== REVIEWED_FABRIC_VERSION,
+        needsPin: sources.some(source => source !== `npm:pi-fabric@${REVIEWED_FABRIC_VERSION}`),
+    };
+}
+
+function repairUnlocked({ dir, run = runCommand, report = console.log, offline = false }) {
     const settingsFile = path.join(dir, 'settings.json');
     const npmDir = path.join(dir, 'npm'), packageFile = path.join(npmDir, 'package.json');
     const root = path.join(npmDir, 'node_modules/pi-fabric');
@@ -30,6 +51,8 @@ export function repairFabric({ dir = agentDir(), run = runCommand, report = cons
     }
     const version = REVIEWED_FABRIC_VERSION;
     const needsInstall = installed.name !== 'pi-fabric' || installed.version !== version || pkg.dependencies?.['pi-fabric'] !== version;
+    if (needsInstall && offline)
+        throw new Error(`Fabric ${version} must be installed and pinned before offline startup. Start Pi once without --offline or PI_OFFLINE to repair it.`);
     const command = settings.npmCommand ?? ['npm'];
     if (needsInstall && (!Array.isArray(command) || !command.length || !command.every(arg => typeof arg === 'string') || !/^(bun|npm)(\.cmd|\.exe)?$/.test(path.basename(command[0]))))
         throw new Error('Fabric repair requires npmCommand to select npm or bun. No files changed.');

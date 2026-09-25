@@ -17,12 +17,14 @@ export class Binding {
     journal;
     admission;
     metrics;
+    outputTool;
     generation = uid('gen_');
     machine = new StateMachine();
     catalog;
     bridge;
     kiro;
     pending;
+    outputRequest;
     writer;
     current;
     expected = [];
@@ -39,7 +41,7 @@ export class Binding {
     observer;
     promptTask;
     lastUsed = Date.now();
-    constructor(key, model, effort, first, config, journal, admission, metrics) {
+    constructor(key, model, effort, first, config, journal, admission, metrics, outputTool) {
         this.key = key;
         this.model = model;
         this.effort = effort;
@@ -48,6 +50,7 @@ export class Binding {
         this.journal = journal;
         this.admission = admission;
         this.metrics = metrics;
+        this.outputTool = outputTool;
         this.catalog = new Catalog(first.tools);
         this.bridge = new ToolServer(this.catalog, config.limits, (name, args, ctx) => this.receiveTool(name, args, ctx));
         const cwd = path.join(config.stateDir, 'workspaces', key.slice(0, 24));
@@ -81,7 +84,7 @@ export class Binding {
             }
             if (event.kind === 'context_usage') {
                 // Tool-less summaries have their own context, not the user's conversation.
-                if (this.catalog.tools.length)
+                if (this.catalog.tools.length && this.outputTool === undefined)
                     metrics.observeContext(this.generation, model.id, event.percent);
                 return;
             }
@@ -99,8 +102,12 @@ export class Binding {
         };
         this.kiro.onFailure = e => this.fail(e);
         this.bridge.onDisconnect = id => {
-            if (!this.closing && this.pending?.requestId === id)
-                this.fail(new BridgeError('UNCERTAIN', 'Kiro disconnected from a held Pi tool call. The effect may have occurred; inspect the journal and Pi transcript.'));
+            if (!this.closing) {
+                if (this.pending?.requestId === id)
+                    this.fail(new BridgeError('UNCERTAIN', 'Kiro disconnected from a held Pi tool call. The effect may have occurred; inspect the journal and Pi transcript.'));
+                else if (this.outputRequest?.id === id)
+                    this.fail(new BridgeError('TRANSPORT', 'Kiro disconnected before structured completion could finish.'));
+            }
         };
     }
     async start(signal) {
@@ -272,6 +279,15 @@ export class Binding {
         if (this.closing || this.fatal)
             throw this.fatal ?? cancelled();
         const tool = this.catalog.resolve(alias);
+        if (this.outputTool !== undefined) {
+            try {
+                return await this.receiveOutput(tool.name, args, ctx);
+            }
+            catch (error) {
+                this.fail(asError(error));
+                throw error;
+            }
+        }
         if (this.pending && this.pending.requestId !== ctx.id)
             throw new BridgeError('BUSY', 'Only one Pi handoff may be outstanding; request other actions after its result.');
         const received = this.journal.receive({ binding: this.key, generation: this.generation, requestId: ctx.id, toolName: tool.name, argsHash: hash(args) });
@@ -308,6 +324,38 @@ export class Binding {
             throw e;
         }
         return pending.response.promise;
+    }
+    async receiveOutput(name, args, ctx) {
+        if (name !== this.outputTool)
+            throw new BridgeError('POLICY', 'Structured completion requested an unexpected output tool.');
+        if (Buffer.byteLength(JSON.stringify(args)) > this.config.limits.maxOutputBytes)
+            throw new BridgeError('LIMIT', 'Structured output exceeds the bridge byte limit.');
+        const argsHash = hash(args);
+        if (this.outputRequest) {
+            if (this.outputRequest.id !== ctx.id || this.outputRequest.argsHash !== argsHash)
+                throw new BridgeError('PROTOCOL', 'Structured completion may return only one result.');
+            return this.outputRequest.response.promise;
+        }
+        if (this.machine.phase !== 'GENERATING' || !this.writer || this.writer.done)
+            throw new BridgeError('POLICY', 'No structured completion authorizes an output request.');
+        const output = { id: ctx.id, argsHash, response: deferred() };
+        this.outputRequest = output;
+        try {
+            await this.kiro.flushEvents();
+            throwIfAborted(ctx.signal);
+            if (this.closing || this.fatal)
+                throw this.fatal ?? cancelled();
+            // Data only: never dispatch a host effect or create an effect journal row.
+            // Keep MCP and admission held until the isolated runtime closes this
+            // session. Its completion API does not publish this result until then.
+            this.writer.tool({ type: 'toolCall', id: uid('output_'), name, arguments: structuredClone(args) });
+            this.complete.resolve();
+        }
+        catch (error) {
+            this.fail(asError(error));
+            throw error;
+        }
+        return output.response.promise;
     }
     release() { this.lease?.release(); this.lease = undefined; }
     fail(e) {
@@ -356,6 +404,7 @@ export class Binding {
             }
         });
         this.pending?.response.reject(this.fatal ?? cancelled());
+        this.outputRequest?.response.reject(this.fatal ?? cancelled());
         try {
             await this.bridge.close();
         }

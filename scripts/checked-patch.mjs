@@ -10,19 +10,25 @@ export function checkedPatch({ root, packageName, packageVersion, specs, manifes
     const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
     if (pkg.name !== packageName || pkg.version !== packageVersion)
         throw new Error(`${packageName} ${pkg.version} needs a fresh review; supported version is ${packageVersion}. No files changed.`);
-    const plan = specs.map(({ name, sha256, edits, header = '' }) => {
+    const plan = specs.map(({ name, sha256, edits, header = '', previous = [] }) => {
         const file = path.join(root, name), backup = `${file}.kiro-acp-original`;
         const source = fs.readFileSync(fs.existsSync(backup) ? backup : file, 'utf8');
         if (digest(source) !== sha256) throw new Error(`Unrecognized ${packageName} code: ${name}. No files changed.`);
-        let patched = source;
-        for (const [before, after, count = 1] of edits) {
-            if (patched.split(before).length !== count + 1)
-                throw new Error(`Unexpected patch locations in ${name}. No files changed.`);
-            patched = patched.split(before).join(after);
-        }
-        patched = patched.startsWith('#!') ? patched.replace(/^(#![^\n]*\n)/, `$1${header}`) : header + patched;
+        const render = ({ edits, header = '' }) => {
+            let patched = source;
+            for (const [before, after, count = 1] of edits) {
+                if (patched.split(before).length !== count + 1)
+                    throw new Error(`Unexpected patch locations in ${name}. No files changed.`);
+                patched = patched.split(before).join(after);
+            }
+            return patched.startsWith('#!') ? patched.replace(/^(#![^\n]*\n)/, `$1${header}`) : header + patched;
+        };
+        const patched = render({ edits, header });
+        // Upgrade only byte-exact, reviewed older recipes. A backup or manifest
+        // alone never authorizes overwriting modified installed code.
+        const prior = previous.map(render);
         const current = fs.readFileSync(file, 'utf8');
-        if (current !== source && current !== patched)
+        if (current !== source && current !== patched && !prior.includes(current))
             throw new Error(`Modified ${packageName} installation: ${name}. No files changed.`);
         return { name, file, backup, source, patched, current };
     });

@@ -63,6 +63,10 @@ export async function installExtension(pi: PiPort, ai: PiAiPort, tui?: UsageUiPo
             const next = result.models.map(m => toModel(m, config));
             await ctx.publish({ update: () => { models = next; } });
         }, stream, streamSimple: stream,
+        // Explicit capability for result-only callers such as Fabric approvals.
+        completeStructured: (model: Model, context: EffectiveContext, options?: GenerationOptions) => {
+            checkFabric(); return runtime.completeStructured(model, context, options);
+        },
     };
     pi.registerProvider(provider);
     let creditsUI: HostContext['ui'];
