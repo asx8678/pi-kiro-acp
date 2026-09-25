@@ -67,15 +67,22 @@ from that foreground indicator.
   also does this on a task row. Up/down and Page Up/Down scroll; `t` or Esc returns
   to the list. Counts retain per-field coverage and are never added together.
 - Dashboard tokens and credits use the same selected local day, attributed by
-  prompt start. Multi-day tasks are filtered accordingly; the footer widget and
-  task reports keep their all-days totals. Legacy requests without task records
-  remain drillable and keep their tokens. Finished tasks without an explicit
-  outcome show "Settled", not "Unfinished" or a fabricated success outcome.
+  prompt start. Multi-day tasks are filtered accordingly; task reports and
+  `/kiro usage` keep their all-days token totals. Legacy requests without task
+  records remain drillable and keep their tokens. Finished tasks without an
+  explicit outcome show "Settled", not "Unfinished" or a fabricated success outcome.
 - `r` refreshes the account snapshot; `/usage refresh` does the same. Esc goes
   back, and `q` closes the dashboard.
 
-The footer shows recorded credits used today and plan credits remaining. Its
-`cached` marker means the account read exceeds the configured cache age (five
+The footer uses one compact status line for recorded credits used today, plan
+credits remaining and Kiro context usage. Unavailable plan/context fields are
+omitted; missing credit reports remain labelled `pending`. For example:
+
+```text
+Kiro · Today 3.1 cr · Plan 774.21/2,000 left · Context 3.7% (auto)
+```
+
+Its `cached` marker means the account read exceeds the configured cache age (five
 minutes by default) or a refresh failed. The dashboard always shows a relative
 "Updated …" age beside the balance, including compact layouts; `STALE` uses the
 same configured threshold and also marks failed refreshes. `/kiro usage` retains the
@@ -100,7 +107,7 @@ refreshes every five seconds without a network call or catalog refresh.
 Local usage views use a bounded cache invalidated by SQLite's local change count
 and cross-connection data version, so worker corrections are not pinned in stale
 views. Transactions bypass the cache. Indexed session/day queries avoid scanning
-account-wide history for session tokens or formatting every prompt's date. Widget
+account-wide history for session tokens or formatting every prompt's date. Status
 updates coalesce over 50 ms and share one credit snapshot; dashboard rendering and
 resizing use a prepared view model and perform no SQL. Navigation and explicit or
 periodic refresh update that model. Budget admission still reads current daily
@@ -178,12 +185,11 @@ remains the source for shared totals.
 
 ### Reported tokens
 
-After a user task settles, a widget below the editor shows credits, then
-**Last prompt tokens** and **Session tokens** on separate lines. A prompt here
-means the complete user task, including its ACP requests, tool continuations
-and attributed Fabric workers. Session totals use the stable session ID and
-survive restarting Pi. Late worker reports update these totals. The widget
-does not add messages to model context or replace Pi's normal footer.
+Token details are available in `/usage` and `/kiro usage`; they do not add rows
+below the editor. The `lastPrompt` diagnostic means the complete settled user
+task, including its ACP requests, tool continuations and attributed Fabric
+workers. Session totals use the stable session ID and survive restarting Pi.
+Late worker reports update these totals.
 
 Only explicit non-negative integer counts in Kiro `turn_completion` metadata
 are recorded. Input, output, cache and reasoning fields retain their own
@@ -196,12 +202,12 @@ Unqualified ACP response `usage` is also excluded because its turn-versus-sessio
 scope is ambiguous; cumulative session values must not be counted per prompt.
 
 Installed Kiro CLI 2.24.0 reports credits and context percentage but omits exact
-per-turn token counts. These lines therefore say **not reported by Kiro** until
-the CLI supplies them. No historical counts are inferred. `/usage` shows the
-selected task/session's recorded token details (session totals cover all days),
-and `/kiro usage` includes the current session's token diagnostics. Task log
-records include `tokens` and `sessionTokens`, with a reported-request count for
-each field; the same revision rules as credits apply.
+per-turn token counts. Detailed usage views say **not reported by Kiro** until
+the CLI supplies them; the status line omits token counts. No historical counts
+are inferred. `/usage` shows the selected task/session's recorded token details
+for the selected day, and `/kiro usage` includes the current session's token
+diagnostics. Task log records include `tokens` and `sessionTokens`, with a
+reported-request count for each field; the same revision rules as credits apply.
 
 Local history coverage starts when credit recording is first used. It excludes
 earlier runs, other state directories/accounts and unrelated native Kiro

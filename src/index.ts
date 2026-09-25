@@ -6,7 +6,6 @@ import { object, withAbort } from './util.js';
 import { BridgeError, publicError } from './errors.js';
 import { fabricGuardStatus } from './policy/fabric.js';
 import { openUsageDashboard, type UsageUiPort } from './ui/usage-dashboard.js';
-import { tokenText } from './ui/token-usage.js';
 const efficiencyGuidance = `Execution efficiency: use fabric_exec code mode for tools. For unfamiliar large codebases, use extensions.fovea_sketch/fovea_focus when available, then read the relevant symbols or line ranges. Batch independent calls and return compact computed findings, not entire files or raw result arrays. Avoid redundant reads and automatic extra planning turns. Delegate only when the task benefits enough to justify another model context; workers default to Kiro Auto. Never claim a tool result was seen if it was truncated.`;
 export interface PiAiPort {
     createAssistantMessageEventStream: () => PiStream;
@@ -68,7 +67,6 @@ export async function installExtension(pi: PiPort, ai: PiAiPort, tui?: UsageUiPo
     pi.registerProvider(provider);
     let creditsUI: HostContext['ui'];
     let usageSessionId = runtime.journal.instance;
-    let shownWidget: string | undefined;
     const creditWarnings = new Set<string>();
     let creditUpdate: NodeJS.Timeout | undefined;
     const showCredits = () => {
@@ -77,20 +75,7 @@ export async function installExtension(pi: PiPort, ai: PiAiPort, tui?: UsageUiPo
             return;
         const usage = runtime.credits.snapshot();
         const status = runtime.metrics.creditStatus(usage);
-        const tokens = runtime.credits.tokenUsage(usageSessionId);
-        if (creditsUI.setWidget && tokens.lastPrompt) {
-            const lines = [status, `Last prompt tokens: ${tokenText(tokens.lastPrompt)}`, `Session tokens: ${tokenText(tokens.session)}`];
-            const key = lines.join('\n');
-            creditsUI.setStatus?.('kiro-credits', undefined);
-            if (shownWidget !== key) {
-                creditsUI.setWidget('kiro-usage', lines, { placement: 'belowEditor' });
-                shownWidget = key;
-            }
-        } else {
-            if (shownWidget !== undefined) creditsUI.setWidget?.('kiro-usage', undefined);
-            shownWidget = undefined;
-            creditsUI.setStatus?.('kiro-credits', status);
-        }
+        creditsUI.setStatus?.('kiro-credits', status);
         const key = `${usage.day}:${usage.warningCredits}`;
         if (usage.warning && !creditWarnings.has(key)) {
             creditWarnings.add(key);

@@ -84,16 +84,23 @@ export class Metrics {
     creditStatus(usage = this.ledger?.snapshot()) {
         if (this.ledger && usage) {
             const format = (n) => n > 0 && n < 0.01 ? '<0.01' : new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(n);
-            const limit = usage.dailyLimit === null ? '' : ` / ${usage.dailyLimit}`;
-            const used = usage.reportedCredits === null && usage.prompts > 0 ? 'awaiting credit report' : `${format(usage.reportedCredits ?? 0)}${limit} credits`;
-            const pending = usage.unreportedPrompts && usage.reportedCredits !== null ? `; ${usage.unreportedPrompts} awaiting credit report` : '';
+            const limit = usage.dailyLimit === null ? '' : `/${format(usage.dailyLimit)}`;
+            const used = usage.reportedCredits === null && usage.prompts > 0 ? 'pending' : `${format(usage.reportedCredits ?? 0)}${limit} cr`;
+            const pending = usage.unreportedPrompts && usage.reportedCredits !== null ? ` (+${usage.unreportedPrompts} pending)` : '';
+            const parts = ['Kiro', `Today ${used}${pending}`];
+            if (usage.exhausted)
+                parts.push('daily limit reached');
+            else if (usage.warning)
+                parts.push('daily warning');
             const account = this.ledger.accountUsage();
             const allowance = account?.allowance;
-            const plan = allowance?.remaining !== null && allowance?.remaining !== undefined && allowance.total !== null
-                ? ` | Plan left ${format(allowance.remaining)}/${format(allowance.total)}${account?.lastError || Date.now() - account.checkedAt > this.accountCacheMs ? ' (cached)' : ''}`
-                : ' | Plan balance unavailable';
-            const context = this.context ? ` | Kiro context ${this.context.percent.toFixed(1)}% (${this.context.model})` : '';
-            return `Kiro today: ${used}${pending}${usage.exhausted ? ' [limit reached]' : usage.warning ? ' [daily warning]' : ''}${plan}${context}`;
+            if (account && allowance?.remaining !== null && allowance?.remaining !== undefined && allowance.total !== null) {
+                const cached = account.lastError || Date.now() - account.checkedAt > this.accountCacheMs ? ' (cached)' : '';
+                parts.push(`Plan ${format(allowance.remaining)}/${format(allowance.total)} left${cached}`);
+            }
+            if (this.context)
+                parts.push(`Context ${this.context.percent.toFixed(1)}% (${this.context.model})`);
+            return parts.join(' · ');
         }
         const n = this.creditsUsed;
         const value = n === null ? 'unknown' : n > 0 && n < 0.000001 ? '<0.000001' : new Intl.NumberFormat('en-US', { maximumFractionDigits: 6 }).format(n);
